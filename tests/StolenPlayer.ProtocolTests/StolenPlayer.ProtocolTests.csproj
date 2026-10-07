@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\StolenPlayer\Protocol\ProtocolMessage.cs" Link="ProtocolMessage.cs" />
+    <Compile Include="..\..\src\StolenPlayer\Networking\ITransport.cs" Link="ITransport.cs" />
+    <Compile Include="..\..\src\StolenPlayer\Networking\TransportPeer.cs" Link="TransportPeer.cs" />
+    <Compile Include="..\..\src\StolenPlayer\Networking\TcpTransport.cs" Link="TcpTransport.cs" />
+  </ItemGroup>
+</Project>

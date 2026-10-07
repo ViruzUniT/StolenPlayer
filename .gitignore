@@ -1,0 +1,29 @@
+# Build output
+**/bin/
+**/obj/
+**/TestResults/
+**/coverage/
+.vs/
+
+# Compiled game/plugin binaries
+*.dll
+*.pdb
+*.exe
+
+# Local IDE and user-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.env
+.env.*
+*.local
+
+# Logs and generated deployment files
+*.log
+*.dll.backup.*
+*.deploying.*
+
+# Operating system files
+Thumbs.db
+Desktop.ini
