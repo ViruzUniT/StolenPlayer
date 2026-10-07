@@ -8,6 +8,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(TS2Path)\Thief Simulator 2_Data\Managed\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
     <Reference Include="BepInEx">
       <HintPath>$(TS2Path)\BepInEx\core\BepInEx.dll</HintPath>
       <Private>false</Private>

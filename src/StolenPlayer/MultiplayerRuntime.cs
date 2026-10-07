@@ -1,6 +1,7 @@
 using System;
 using StolenPlayer.Protocol;
 using StolenPlayer.Sessions;
+using StolenPlayer.World;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
@@ -32,6 +33,7 @@ internal sealed class MultiplayerRuntime : MonoBehaviour
     _session.HostPoseReceived += OnHostPoseReceived;
     _remotePlayers = gameObject.AddComponent<RemotePlayerManager>();
     _remotePlayers.Initialize(_session);
+    gameObject.AddComponent<StaticWorldIdentityScanner>();
     _window = _initialWindow;
     _portInput = config.ListenPort.Value.ToString();
   }

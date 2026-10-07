@@ -1,14 +1,16 @@
 # Direct IP connection checks
 
-The current milestone verifies connection setup and protocol compatibility only. Players will not appear in one another's worlds until remote-player replication is implemented.
+The current prototype verifies direct-IP connection, host-scene loading, and visual remote-player synchronization. Door identities are scanned for diagnostics but are not used to authorize or replicate interactions yet.
 
 ## Same-computer loopback
 
 1. Install the same plugin build in two isolated TS2 copies or run two game instances with separate user profiles.
 2. Start one instance, open the F8 panel, choose port `27960`, and select **Host direct IP session**.
 3. Start the client instance, enter `127.0.0.1` and port `27960`, then select **Join IP**.
-4. Confirm the host shows one ready peer and the client reports the compatible host handshake.
-5. Leave from either side and confirm the other side detects the disconnect.
+4. Confirm the host shows one ready peer and the client loads the host's current scene and spawn position.
+5. Confirm both players can see the other move; check that walking/running animations follow movement and the idle pose remains upright.
+6. In each BepInEx log, compare the `Static world identity scan` door counts for the loaded scene. Investigate any `Door identity rejected` messages; object keys are diagnostic only and do not yet drive gameplay replication.
+7. Leave from either side and confirm the other side detects the disconnect and removes its avatar.
 
 ## Local network
 

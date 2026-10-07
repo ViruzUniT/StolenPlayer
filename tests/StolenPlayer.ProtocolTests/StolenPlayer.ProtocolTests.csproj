@@ -11,5 +11,6 @@
     <Compile Include="..\..\src\StolenPlayer\Networking\ITransport.cs" Link="ITransport.cs" />
     <Compile Include="..\..\src\StolenPlayer\Networking\TransportPeer.cs" Link="TransportPeer.cs" />
     <Compile Include="..\..\src\StolenPlayer\Networking\TcpTransport.cs" Link="TcpTransport.cs" />
+    <Compile Include="..\..\src\StolenPlayer\World\StableObjectIdentity.cs" Link="StableObjectIdentity.cs" />
   </ItemGroup>
 </Project>

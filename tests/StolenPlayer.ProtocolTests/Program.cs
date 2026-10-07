@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Threading;
 using StolenPlayer.Networking;
 using StolenPlayer.Protocol;
+using StolenPlayer.World;
 
 ProtocolCodecTests.RunAll();
 
@@ -20,6 +21,7 @@ internal static class ProtocolCodecTests
     RejectsMalformedHandshakePayloads();
     RoundTripsPlayerPoseAndRoster();
     RoundTripsSceneNamePayload();
+    StableObjectIdentityTests.RunAll();
     TcpTransportConnectsAndFramesPackets();
     Console.WriteLine("Protocol codec checks passed.");
   }
@@ -223,5 +225,45 @@ internal static class ProtocolCodecTests
     {
       throw new InvalidOperationException(message);
     }
+  }
+}
+
+internal static class StableObjectIdentityTests
+{
+  internal static void RunAll()
+  {
+    var first = Create("ts2-build", "MainScene", "DOMY/Interior/Cabinet/Door", "Door");
+    var repeated = Create("ts2-build", "MainScene", "DOMY/Interior/Cabinet/Door", "Door");
+    Assert(first.Equals(repeated), "Identical static-object paths produced different keys.");
+    Assert(first.ToString().Length == 32, "Static-object key is not serialized as a 128-bit hex identifier.");
+    Assert(!first.Equals(Create("other-build", "MainScene", "DOMY/Interior/Cabinet/Door", "Door")), "Build identity was not included in the key.");
+    Assert(!first.Equals(Create("ts2-build", "OtherScene", "DOMY/Interior/Cabinet/Door", "Door")), "Scene name was not included in the key.");
+    Assert(!first.Equals(Create("ts2-build", "MainScene", "DOMY/Interior/Other/Door", "Door")), "Hierarchy path was not included in the key.");
+    Assert(!first.Equals(Create("ts2-build", "MainScene", "DOMY/Interior/Cabinet/Door", "Pickupable")), "Component type was not included in the key.");
+
+    var registry = new StableObjectRegistry<object>();
+    var localObject = new object();
+    Assert(registry.TryRegister(first, localObject, out var error), $"Initial static-object registration failed: {error}");
+    Assert(registry.TryRegister(repeated, localObject, out error), $"Idempotent static-object registration failed: {error}");
+    Assert(registry.Count == 1, "Idempotent registration created a duplicate registry entry.");
+    Assert(registry.TryGet(first, out var resolved) && ReferenceEquals(localObject, resolved), "Static-object registry did not resolve its registered instance.");
+    Assert(!registry.TryRegister(first, new object(), out error) && error.Contains("Ambiguous"), "Duplicate local hierarchy identity was not rejected.");
+    Assert(registry.Remove(first, localObject), "Registered static-object instance could not be removed.");
+    Assert(!registry.TryGet(first, out _), "Removed static-object identity remained resolvable.");
+    Assert(!StableObjectKey.TryCreate("", "scene", "path", "Door", out _, out _), "Empty build identity was accepted.");
+    Assert(!StableObjectKey.TryCreate("build", " ", "path", "Door", out _, out _), "Whitespace scene name was accepted.");
+    Assert(!StableObjectKey.TryCreate("build", "scene", "", "Door", out _, out _), "Empty hierarchy path was accepted.");
+    Assert(!StableObjectKey.TryCreate("build", "scene", "path", "\t", out _, out _), "Whitespace component type was accepted.");
+  }
+
+  private static StableObjectKey Create(string build, string scene, string path, string component)
+  {
+    Assert(StableObjectKey.TryCreate(build, scene, path, component, out var key, out var error), $"Static-object key creation failed: {error}");
+    return key;
+  }
+
+  private static void Assert(bool condition, string message)
+  {
+    if (!condition) throw new InvalidOperationException(message);
   }
 }
