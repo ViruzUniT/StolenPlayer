@@ -14,7 +14,153 @@ internal enum MessageKind : byte
   WorldPlayerPose = 7,
   PlayerRoster = 8,
   HostScene = 9,
-  ClientSceneReady = 10
+  ClientSceneReady = 10,
+  UdpPathReady = 11
+}
+
+internal enum UdpPoseKind : byte
+{
+  ClientPose = 1,
+  WorldPose = 2
+}
+
+internal readonly struct UdpPoseDatagram
+{
+  internal UdpPoseDatagram(UdpPoseKind kind, ulong senderPeerId, uint sequence, byte[] token, byte[] payload)
+  {
+    Kind = kind;
+    SenderPeerId = senderPeerId;
+    Sequence = sequence;
+    Token = token;
+    Payload = payload;
+  }
+
+  internal UdpPoseKind Kind { get; }
+  internal ulong SenderPeerId { get; }
+  internal uint Sequence { get; }
+  internal byte[] Token { get; }
+  internal byte[] Payload { get; }
+}
+
+/// <summary>Small versioned datagrams with a per-connection token and an independent sequence stream.</summary>
+internal static class UdpPoseDatagramCodec
+{
+  private const uint Magic = 0x44505553; // "SUPD" in little-endian bytes.
+  private const int TokenLength = 16;
+  private const int HeaderLength = sizeof(uint) + sizeof(ushort) + sizeof(byte) + sizeof(ulong) + sizeof(uint) + TokenLength;
+  internal const int MaximumDatagramLength = 512;
+
+  internal static byte[] Encode(UdpPoseKind kind, ulong senderPeerId, uint sequence, byte[] token, byte[] payload)
+  {
+    if (!Enum.IsDefined(typeof(UdpPoseKind), kind) || senderPeerId == 0 || sequence == 0
+        || token == null || token.Length != TokenLength || payload == null
+        || payload.Length == 0 || HeaderLength + payload.Length > MaximumDatagramLength)
+    {
+      throw new ArgumentException("UDP pose datagram fields are invalid.");
+    }
+
+    var packet = new byte[HeaderLength + payload.Length];
+    WriteUInt32(packet, 0, Magic);
+    WriteUInt16(packet, sizeof(uint), ProtocolCodec.CurrentVersion);
+    packet[sizeof(uint) + sizeof(ushort)] = (byte)kind;
+    WriteUInt64(packet, sizeof(uint) + sizeof(ushort) + sizeof(byte), senderPeerId);
+    WriteUInt32(packet, sizeof(uint) + sizeof(ushort) + sizeof(byte) + sizeof(ulong), sequence);
+    Array.Copy(token, 0, packet, HeaderLength - TokenLength, TokenLength);
+    Array.Copy(payload, 0, packet, HeaderLength, payload.Length);
+    return packet;
+  }
+
+  internal static bool TryDecode(byte[] packet, out UdpPoseDatagram datagram)
+  {
+    datagram = default;
+    if (packet == null || packet.Length <= HeaderLength || packet.Length > MaximumDatagramLength
+        || ReadUInt32(packet, 0) != Magic
+        || ReadUInt16(packet, sizeof(uint)) != ProtocolCodec.CurrentVersion)
+        return false;
+
+    var kind = (UdpPoseKind)packet[sizeof(uint) + sizeof(ushort)];
+    var peerId = ReadUInt64(packet, sizeof(uint) + sizeof(ushort) + sizeof(byte));
+    var sequenceOffset = sizeof(uint) + sizeof(ushort) + sizeof(byte) + sizeof(ulong);
+    var sequence = ReadUInt32(packet, sequenceOffset);
+    if (!Enum.IsDefined(typeof(UdpPoseKind), kind) || peerId == 0 || sequence == 0)
+    {
+      return false;
+    }
+
+    var token = new byte[TokenLength];
+    var payload = new byte[packet.Length - HeaderLength];
+    Array.Copy(packet, HeaderLength - TokenLength, token, 0, TokenLength);
+    Array.Copy(packet, HeaderLength, payload, 0, payload.Length);
+    if (kind == UdpPoseKind.ClientPose && !PlayerPosePayload.TryDecode(payload, out _)
+        || kind == UdpPoseKind.WorldPose && !PlayerPosePayload.TryDecodeWorldPose(payload, out _, out _))
+    {
+      return false;
+    }
+
+    datagram = new UdpPoseDatagram(kind, peerId, sequence, token, payload);
+    return true;
+  }
+
+  private static void WriteUInt16(byte[] bytes, int offset, ushort value)
+  {
+    bytes[offset] = (byte)value;
+    bytes[offset + 1] = (byte)(value >> 8);
+  }
+
+  private static ushort ReadUInt16(byte[] bytes, int offset) => (ushort)(bytes[offset] | (bytes[offset + 1] << 8));
+
+  private static void WriteUInt32(byte[] bytes, int offset, uint value)
+  {
+    for (var index = 0; index < sizeof(uint); index++) bytes[offset + index] = (byte)(value >> (index * 8));
+  }
+
+  private static uint ReadUInt32(byte[] bytes, int offset)
+  {
+    uint value = 0;
+    for (var index = 0; index < sizeof(uint); index++) value |= (uint)bytes[offset + index] << (index * 8);
+    return value;
+  }
+
+  private static void WriteUInt64(byte[] bytes, int offset, ulong value)
+  {
+    for (var index = 0; index < sizeof(ulong); index++) bytes[offset + index] = (byte)(value >> (index * 8));
+  }
+
+  private static ulong ReadUInt64(byte[] bytes, int offset)
+  {
+    ulong value = 0;
+    for (var index = 0; index < sizeof(ulong); index++) value |= (ulong)bytes[offset + index] << (index * 8);
+    return value;
+  }
+}
+
+internal static class WelcomePayload
+{
+  private const int TokenLength = 16;
+
+  internal static byte[] EncodeAccepted(byte[] token)
+  {
+    if (token == null || token.Length != TokenLength) throw new ArgumentException("UDP session token must be 16 bytes.", nameof(token));
+    var payload = new byte[1 + TokenLength];
+    payload[0] = 1;
+    Array.Copy(token, 0, payload, 1, TokenLength);
+    return payload;
+  }
+
+  internal static byte[] EncodeRejected() => new byte[] { 0 };
+
+  internal static bool TryDecode(byte[] payload, out bool accepted, out byte[] token)
+  {
+    accepted = false;
+    token = Array.Empty<byte>();
+    if (payload == null || (payload.Length != 1 && payload.Length != 1 + TokenLength)) return false;
+    if (payload[0] == 0) return payload.Length == 1;
+    if (payload[0] != 1 || payload.Length != 1 + TokenLength) return false;
+    token = new byte[TokenLength];
+    Array.Copy(payload, 1, token, 0, TokenLength);
+    accepted = true;
+    return true;
+  }
 }
 
 internal static class SceneNamePayload
@@ -302,7 +448,7 @@ internal readonly struct ProtocolMessage
 internal static class ProtocolCodec
 {
   internal const uint Magic = 0x43504C53; // "SLPC" in little-endian bytes.
-  internal const ushort CurrentVersion = 3;
+  internal const ushort CurrentVersion = 4;
   internal const int HeaderLength = 19;
   internal const int MaximumMessageSize = 64 * 1024;
 

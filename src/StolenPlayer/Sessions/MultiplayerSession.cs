@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Net;
 using System.Security.Cryptography;
 using StolenPlayer.Networking;
 using StolenPlayer.Protocol;
@@ -27,6 +28,7 @@ internal sealed class MultiplayerSession : IDisposable
   private const double HeartbeatIntervalSeconds = 2.0;
   private const double RejectedPeerCloseDelaySeconds = 0.5;
   private const double MinimumPoseIntervalSeconds = 0.04;
+  private const double UdpPathTimeoutSeconds = 3.0;
   private const double MaximumMovementValidationIntervalSeconds = 0.5;
   private const int MaximumSupportedPlayers = 4;
   private const float MaximumMovementSpeed = 12.0f;
@@ -39,11 +41,14 @@ internal sealed class MultiplayerSession : IDisposable
   private readonly Dictionary<long, PeerState> _peers = new Dictionary<long, PeerState>();
   private readonly List<long> _peerScratch = new List<long>();
   private readonly HashSet<ulong> _knownPeerIds = new HashSet<ulong>();
+  private readonly Dictionary<ulong, PlayerPoseData> _pendingWorldPoses = new Dictionary<ulong, PlayerPoseData>();
   private TcpTransport? _transport;
+  private UdpPoseTransport? _udpTransport;
   private SessionState _state;
   private double _operationDeadline;
   private double _nextHeartbeat;
   private uint _sendSequence;
+  private uint _udpSendSequence;
   private uint _rosterRevision;
   private ulong _localPeerId;
   private int _listenPort;
@@ -58,9 +63,14 @@ internal sealed class MultiplayerSession : IDisposable
   private bool _clientSceneReady;
   private bool _clientWorldReady;
   private bool _clientRosterReceived;
+  private bool _clientUdpPathReady;
+  private bool _clientUdpPathPending;
+  private uint _lastHostUdpSequence;
+  private double _lastHostUdpReceiveTime;
 
   internal event Action<ulong[]>? RosterChanged;
   internal event Action<ulong, PlayerPoseData>? PlayerPoseReceived;
+  internal event Action? SceneReadinessChanged;
   internal event Action<string>? HostSceneReceived;
   internal event Action<PlayerPoseData>? HostPoseReceived;
 
@@ -81,6 +91,14 @@ internal sealed class MultiplayerSession : IDisposable
   internal bool IsClientSceneReady => _clientSceneReady;
   internal bool IsClientWorldReady => _clientWorldReady;
   internal bool HasClientRoster => _clientRosterReceived;
+  internal bool CanMaterializeRemotePlayers(string sceneName)
+  {
+    if (string.IsNullOrEmpty(sceneName)) return false;
+    return _isHost
+      ? _lastLocalPose.HasValue && string.Equals(_hostScene, sceneName, StringComparison.Ordinal)
+          && string.Equals(_lastLocalPose.Value.SceneName, sceneName, StringComparison.Ordinal)
+      : _clientWorldReady && _clientSceneReady && string.Equals(_expectedHostScene, sceneName, StringComparison.Ordinal);
+  }
   internal ulong HostPeerId
   {
     get
@@ -147,7 +165,13 @@ internal sealed class MultiplayerSession : IDisposable
     }
 
     if (connectionId != 0)
-      Send(connectionId, MessageKind.ClientPlayerPose, PlayerPosePayload.Encode(pose), DeliveryMode.Reliable);
+    {
+      SendClientPoseUdp(pose);
+      if (!_clientUdpPathReady)
+      {
+        Send(connectionId, MessageKind.ClientPlayerPose, PlayerPosePayload.Encode(pose), DeliveryMode.Reliable);
+      }
+    }
   }
 
   internal void Host(int port)
@@ -159,7 +183,16 @@ internal sealed class MultiplayerSession : IDisposable
 
     EnsureTransport();
     _isHost = true;
-    SetState(SessionState.StartingHost, $"Opening TCP port {port}...");
+    SetState(SessionState.StartingHost, $"Opening TCP and UDP port {port}...");
+    if (!_udpTransport!.StartHost(port, out var udpError))
+    {
+      Plugin.Log.LogWarning($"UDP movement unavailable; session will use TCP pose fallback: {udpError}");
+    }
+    else
+    {
+      Plugin.Log.LogInfo($"UDP movement listener opened on port {port}.");
+    }
+
     var playerLimit = Math.Min(_config.MaxPlayers.Value, MaximumSupportedPlayers);
     if (!_transport!.StartListening(port, playerLimit - 1, out var error))
     {
@@ -168,8 +201,8 @@ internal sealed class MultiplayerSession : IDisposable
     }
 
     _listenPort = port;
-    SetState(SessionState.Listening, $"Listening for direct IP clients on TCP port {port}. Share your IP address and port.");
-    Plugin.Log.LogInfo($"Direct IP host listening on TCP port {port}; capacity {playerLimit} total players.");
+    SetState(SessionState.Listening, $"Listening for direct IP clients on TCP and UDP port {port}. Share your IP address and port.");
+    Plugin.Log.LogInfo($"Direct IP host listening on TCP and UDP port {port}; capacity {playerLimit} total players.");
   }
 
   internal void Join(string address, int port)
@@ -183,6 +216,10 @@ internal sealed class MultiplayerSession : IDisposable
     EnsureTransport();
     _isHost = false;
     SetState(SessionState.Connecting, $"Connecting to {address}:{port}...");
+    if (!_udpTransport!.StartClient(address, port, out var udpError))
+    {
+      Plugin.Log.LogWarning($"UDP movement unavailable; session will use TCP pose fallback: {udpError}");
+    }
     _operationDeadline = Now + ConnectionTimeoutSeconds;
     if (!_transport!.Connect(address, port, out var error))
     {
@@ -211,7 +248,15 @@ internal sealed class MultiplayerSession : IDisposable
     }
 
     _transport?.Update();
+    _udpTransport?.Update();
     var now = Now;
+    if (!_isHost && _clientUdpPathReady && now - _lastHostUdpReceiveTime > UdpPathTimeoutSeconds)
+    {
+      _clientUdpPathReady = false;
+      _clientUdpPathPending = false;
+      SendHostControl(MessageKind.UdpPathReady, new byte[] { 0 });
+      Plugin.Log.LogWarning("UDP host-pose path timed out; temporarily returning to TCP pose fallback.");
+    }
     if (_state == SessionState.Connecting && now >= _operationDeadline)
     {
       SetError("TCP connection timed out.");
@@ -229,6 +274,13 @@ internal sealed class MultiplayerSession : IDisposable
       if (!_peers.TryGetValue(peerId, out var peer))
       {
         continue;
+      }
+
+      if (_isHost && peer.UdpPathReady && now - peer.LastUdpReceiveTime > UdpPathTimeoutSeconds)
+      {
+        peer.UdpPathReady = false;
+        Send(peerId, MessageKind.UdpPathReady, new byte[] { 0 }, DeliveryMode.Reliable);
+        Plugin.Log.LogWarning($"UDP movement path to peer {peer.RemotePeerId} timed out; returning to TCP pose fallback.");
       }
 
       if (peer.DisconnectAt > 0 && now >= peer.DisconnectAt)
@@ -308,6 +360,10 @@ internal sealed class MultiplayerSession : IDisposable
       message => Plugin.Log.LogInfo(message),
       message => Plugin.Log.LogWarning(message),
       message => Plugin.Log.LogError(message));
+    _udpTransport = new UdpPoseTransport(
+      message => Plugin.Log.LogWarning(message),
+      message => Plugin.Log.LogError(message));
+    _udpTransport.DatagramReceived += OnUdpDatagramReceived;
     _transport.PeerConnected += OnPeerConnected;
     _transport.PacketReceived += OnPacketReceived;
     _transport.PeerDisconnected += OnPeerDisconnected;
@@ -419,6 +475,9 @@ internal sealed class MultiplayerSession : IDisposable
       case MessageKind.ClientSceneReady:
         HandleClientSceneReady(peer.ConnectionId, state, message);
         break;
+      case MessageKind.UdpPathReady:
+        HandleUdpPathReady(peer.ConnectionId, state, message);
+        break;
       case MessageKind.Disconnect:
         _transport?.Disconnect(peer.ConnectionId, "Peer closed the session.");
         break;
@@ -439,7 +498,7 @@ internal sealed class MultiplayerSession : IDisposable
     if (!string.Equals(gameVersion, _gameVersion, StringComparison.Ordinal)
         || !string.Equals(pluginVersion, _pluginVersion, StringComparison.Ordinal))
     {
-      Send(connectionId, MessageKind.Welcome, new byte[] { 0 }, DeliveryMode.Reliable);
+      Send(connectionId, MessageKind.Welcome, WelcomePayload.EncodeRejected(), DeliveryMode.Reliable);
       state.DisconnectAt = Now + RejectedPeerCloseDelaySeconds;
       state.DisconnectReason = $"Peer game/plugin version {gameVersion}/{pluginVersion} is incompatible with {_gameVersion}/{_pluginVersion}.";
       return;
@@ -449,8 +508,9 @@ internal sealed class MultiplayerSession : IDisposable
     if (_isHost)
     {
       state.Ready = true;
+      state.UdpToken = CreateSessionToken();
       state.SceneSyncDeadline = Now + SceneSynchronizationTimeoutSeconds;
-      Send(connectionId, MessageKind.Welcome, new byte[] { 1 }, DeliveryMode.Reliable);
+      Send(connectionId, MessageKind.Welcome, WelcomePayload.EncodeAccepted(state.UdpToken), DeliveryMode.Reliable);
       Plugin.Log.LogInfo($"TCP peer {state.RemotePeerId} passed the protocol handshake.");
       if (!string.IsNullOrEmpty(_hostScene))
       {
@@ -467,17 +527,30 @@ internal sealed class MultiplayerSession : IDisposable
       return;
     }
 
-    var now = Now;
-    if (now - state.LastPoseReceiveTime < MinimumPoseIntervalSeconds)
+    if (state.UdpPathReady)
     {
       return;
     }
 
-    if (!state.SceneReady || !IsPlausiblePose(pose) || _lastLocalPose == null
-        || !string.Equals(pose.SceneName, _lastLocalPose.Value.SceneName, StringComparison.Ordinal))
+    AcceptClientPose(state, pose);
+  }
+
+  private void AcceptClientPose(PeerState state, PlayerPoseData pose)
+  {
+    if (!state.Ready || !IsPlausiblePose(pose) || _lastLocalPose == null
+        || !string.Equals(pose.SceneName, _lastLocalPose.Value.SceneName, StringComparison.Ordinal)) return;
+
+    if (!state.SceneReady)
     {
+      if (!state.HasPendingPose && _config.VerboseNetworking.Value)
+        Plugin.Log.LogDebug($"Queued first scene-pending pose for peer {state.RemotePeerId} in '{pose.SceneName}'.");
+      state.PendingPose = pose;
+      state.HasPendingPose = true;
       return;
     }
+
+    var now = Now;
+    if (now - state.LastPoseReceiveTime < MinimumPoseIntervalSeconds) return;
 
     if (state.HasPose)
     {
@@ -501,6 +574,11 @@ internal sealed class MultiplayerSession : IDisposable
     state.LastPose = pose;
     state.HasPose = true;
     state.LastPoseReceiveTime = now;
+    if (state.UdpEndPoint != null)
+    {
+      state.LastUdpReceiveTime = now;
+    }
+
     PlayerPoseReceived?.Invoke(state.RemotePeerId, pose);
     PublishWorldPose(state.RemotePeerId, pose);
   }
@@ -510,6 +588,11 @@ internal sealed class MultiplayerSession : IDisposable
     if (_isHost || !state.Ready || !PlayerPosePayload.TryDecodeWorldPose(message.Payload, out var peerId, out var pose))
     {
       _transport?.Disconnect(connectionId, "Unexpected or malformed authoritative player pose.");
+      return;
+    }
+
+    if (_clientUdpPathReady)
+    {
       return;
     }
 
@@ -527,6 +610,7 @@ internal sealed class MultiplayerSession : IDisposable
 
     if (!_clientWorldReady)
     {
+      _pendingWorldPoses[peerId] = pose;
       if (peerId == state.RemotePeerId && _clientRosterReceived)
       {
         HostPoseReceived?.Invoke(pose);
@@ -569,6 +653,8 @@ internal sealed class MultiplayerSession : IDisposable
       _knownPeerIds.Add(peerId);
     }
 
+    RemovePendingWorldPosesOutsideRoster();
+
     _clientRosterReceived = true;
     SetState(SessionState.Connected, "Host scene loaded. Applying host spawn position and player roster.");
     RosterChanged?.Invoke(peerIds);
@@ -587,6 +673,7 @@ internal sealed class MultiplayerSession : IDisposable
     _clientSceneReady = false;
     _clientWorldReady = false;
     _clientRosterReceived = false;
+    _pendingWorldPoses.Clear();
     _knownPeerIds.Clear();
     RosterChanged?.Invoke(Array.Empty<ulong>());
     SetState(SessionState.Connected, $"Host scene: {sceneName}. Loading host game scene...");
@@ -613,8 +700,244 @@ internal sealed class MultiplayerSession : IDisposable
     state.SceneReady = true;
     state.SceneSyncDeadline = 0;
     _rosterRevision++;
+    // A previous scene's last pose is not a valid spawn snapshot for this scene.
+    state.HasPose = false;
+    state.LastPoseReceiveTime = 0;
+    var hasPendingPose = state.HasPendingPose;
+    var pendingPose = state.PendingPose;
+    state.HasPendingPose = false;
     Plugin.Log.LogInfo($"Peer {state.RemotePeerId} loaded host scene '{sceneName}'. Sending its initial player snapshot.");
     RefreshRosterAndSnapshots();
+    if (hasPendingPose) AcceptClientPose(state, pendingPose);
+    SceneReadinessChanged?.Invoke();
+  }
+
+  private void HandleUdpPathReady(long connectionId, PeerState state, ProtocolMessage message)
+  {
+    if (!state.Ready)
+    {
+      _transport?.Disconnect(connectionId, "Unexpected UDP path acknowledgement.");
+      return;
+    }
+
+    if (_isHost)
+    {
+      if (message.Payload.Length == 1 && message.Payload[0] == 0)
+      {
+        state.UdpPathReady = false;
+        Send(connectionId, MessageKind.UdpPathReady, new byte[] { 0 }, DeliveryMode.Reliable);
+        Plugin.Log.LogWarning($"Peer {state.RemotePeerId} reported UDP movement loss; returning to TCP pose fallback.");
+        return;
+      }
+
+      if (message.Payload.Length != 0 || state.UdpEndPoint == null)
+      {
+        _transport?.Disconnect(connectionId, "Unexpected UDP path acknowledgement.");
+        return;
+      }
+
+      if (!state.UdpPathReady)
+      {
+        state.UdpPathReady = true;
+        state.LastUdpReceiveTime = Now;
+        Send(connectionId, MessageKind.UdpPathReady, new byte[] { 1 }, DeliveryMode.Reliable);
+        Plugin.Log.LogInfo($"UDP movement path established with peer {state.RemotePeerId}.");
+      }
+
+      return;
+    }
+
+    if (message.Payload.Length == 1 && message.Payload[0] == 1)
+    {
+      _clientUdpPathPending = false;
+      if (!_clientUdpPathReady)
+      {
+        _clientUdpPathReady = true;
+        _lastHostUdpReceiveTime = Now;
+        Plugin.Log.LogInfo("UDP movement path confirmed by the host.");
+      }
+    }
+    else if (message.Payload.Length == 1 && message.Payload[0] == 0)
+    {
+      _clientUdpPathReady = false;
+      _clientUdpPathPending = false;
+      Plugin.Log.LogWarning("Host reported UDP movement loss; returning to TCP pose fallback.");
+    }
+    else
+    {
+      _transport?.Disconnect(connectionId, "Malformed UDP path control message.");
+    }
+  }
+
+  private void OnUdpDatagramReceived(IPEndPoint endpoint, byte[] packet)
+  {
+    if (!UdpPoseDatagramCodec.TryDecode(packet, out var datagram))
+    {
+      if (_config.VerboseNetworking.Value)
+      {
+        Plugin.Log.LogDebug("Ignored malformed UDP movement datagram.");
+      }
+
+      return;
+    }
+
+    if (_isHost)
+    {
+      HandleClientPoseDatagram(endpoint, datagram);
+    }
+    else
+    {
+      HandleWorldPoseDatagram(datagram);
+    }
+  }
+
+  private void HandleClientPoseDatagram(IPEndPoint endpoint, UdpPoseDatagram datagram)
+  {
+    if (datagram.Kind != UdpPoseKind.ClientPose || !PlayerPosePayload.TryDecode(datagram.Payload, out var pose))
+    {
+      return;
+    }
+
+    PeerState? state = null;
+    foreach (var peer in _peers.Values)
+    {
+      if (peer.RemotePeerId == datagram.SenderPeerId)
+      {
+        state = peer;
+        break;
+      }
+    }
+
+    if (state == null || !state.Ready || !TokensEqual(state.UdpToken, datagram.Token)
+        || !ProtocolCodec.IsSequenceNewer(datagram.Sequence, state.LastUdpSequence))
+    {
+      return;
+    }
+
+    if (!IsPlausiblePose(pose) || _lastLocalPose == null
+        || !string.Equals(pose.SceneName, _lastLocalPose.Value.SceneName, StringComparison.Ordinal))
+    {
+      return;
+    }
+
+    state.LastUdpSequence = datagram.Sequence;
+    state.UdpEndPoint = endpoint;
+    AcceptClientPose(state, pose);
+  }
+
+  private void HandleWorldPoseDatagram(UdpPoseDatagram datagram)
+  {
+    PeerState? host = null;
+    long connectionId = 0;
+    foreach (var peer in _peers)
+    {
+      if (peer.Value.Ready && peer.Value.RemotePeerId == datagram.SenderPeerId)
+      {
+        host = peer.Value;
+        connectionId = peer.Key;
+        break;
+      }
+    }
+
+    if (datagram.Kind != UdpPoseKind.WorldPose || host == null || !TokensEqual(host.UdpToken, datagram.Token)
+        || !ProtocolCodec.IsSequenceNewer(datagram.Sequence, _lastHostUdpSequence)
+        || !PlayerPosePayload.TryDecodeWorldPose(datagram.Payload, out var peerId, out var pose)
+        || !IsPlausiblePose(pose) || !_clientSceneReady
+        || _lastLocalPose == null || !string.Equals(pose.SceneName, _lastLocalPose.Value.SceneName, StringComparison.Ordinal)
+        || !IsInCurrentRoster(peerId))
+    {
+      return;
+    }
+
+    _lastHostUdpSequence = datagram.Sequence;
+    _lastHostUdpReceiveTime = Now;
+    if (!_clientUdpPathReady && !_clientUdpPathPending)
+    {
+      _clientUdpPathPending = true;
+      Send(connectionId, MessageKind.UdpPathReady, Array.Empty<byte>(), DeliveryMode.Reliable);
+    }
+
+    if (!_clientWorldReady)
+    {
+      _pendingWorldPoses[peerId] = pose;
+      if (peerId == host.RemotePeerId) HostPoseReceived?.Invoke(pose);
+      return;
+    }
+
+    if (peerId != _localPeerId)
+    {
+      PlayerPoseReceived?.Invoke(peerId, pose);
+    }
+  }
+
+  private void SendClientPoseUdp(PlayerPoseData pose)
+  {
+    if (_udpTransport == null || !_udpTransport.IsRunning)
+    {
+      return;
+    }
+
+    foreach (var peer in _peers.Values)
+    {
+      if (peer.Ready && peer.UdpToken != null)
+      {
+        SendUdp(null, UdpPoseKind.ClientPose, _localPeerId, peer.UdpToken, PlayerPosePayload.Encode(pose));
+        return;
+      }
+    }
+  }
+
+  private void SendHostControl(MessageKind kind, byte[] payload)
+  {
+    if (_isHost) return;
+    foreach (var peer in _peers)
+    {
+      if (peer.Value.Ready)
+      {
+        Send(peer.Key, kind, payload, DeliveryMode.Reliable);
+        return;
+      }
+    }
+  }
+
+  private bool SendUdp(IPEndPoint? endpoint, UdpPoseKind kind, ulong senderPeerId, byte[]? token, byte[] payload)
+  {
+    if (_udpTransport == null || !_udpTransport.IsRunning || token == null)
+    {
+      return false;
+    }
+
+    _udpSendSequence++;
+    if (_udpSendSequence == 0) _udpSendSequence = 1;
+    try
+    {
+      var packet = UdpPoseDatagramCodec.Encode(kind, senderPeerId, _udpSendSequence, token, payload);
+      return _udpTransport.Send(packet, endpoint);
+    }
+    catch (Exception exception)
+    {
+      Plugin.Log.LogWarning($"Could not encode UDP movement datagram: {exception.Message}");
+      return false;
+    }
+  }
+
+  private static bool TokensEqual(byte[]? expected, byte[] received)
+  {
+    if (expected == null || received == null || expected.Length != received.Length)
+    {
+      return false;
+    }
+
+    var difference = 0;
+    for (var index = 0; index < expected.Length; index++) difference |= expected[index] ^ received[index];
+    return difference == 0;
+  }
+
+  private static byte[] CreateSessionToken()
+  {
+    var token = new byte[16];
+    using (var random = RandomNumberGenerator.Create()) random.GetBytes(token);
+    return token;
   }
 
   internal bool MarkClientSceneReady(string sceneName)
@@ -627,6 +950,7 @@ internal sealed class MultiplayerSession : IDisposable
 
     if (_clientSceneReady) return true;
     _clientSceneReady = true;
+    SceneReadinessChanged?.Invoke();
     foreach (var pair in _peers)
     {
       if (pair.Value.Ready)
@@ -653,7 +977,28 @@ internal sealed class MultiplayerSession : IDisposable
     _clientSceneSyncDeadline = 0;
     SetState(SessionState.Connected, "Host scene, spawn position, and player roster synchronized.");
     Plugin.Log.LogInfo("Client initial synchronization complete; enabling player pose replication.");
+    foreach (var pair in _pendingWorldPoses)
+    {
+      if (pair.Key != _localPeerId && _knownPeerIds.Contains(pair.Key)
+          && string.Equals(pair.Value.SceneName, _expectedHostScene, StringComparison.Ordinal))
+      {
+        PlayerPoseReceived?.Invoke(pair.Key, pair.Value);
+      }
+    }
+    _pendingWorldPoses.Clear();
+    SceneReadinessChanged?.Invoke();
     return true;
+  }
+
+  private void RemovePendingWorldPosesOutsideRoster()
+  {
+    var stale = new List<ulong>();
+    foreach (var peerId in _pendingWorldPoses.Keys)
+    {
+      if (!_knownPeerIds.Contains(peerId)) stale.Add(peerId);
+    }
+
+    foreach (var peerId in stale) _pendingWorldPoses.Remove(peerId);
   }
 
   internal void FailSceneSynchronization(string reason)
@@ -696,7 +1041,6 @@ internal sealed class MultiplayerSession : IDisposable
 
   private void PublishWorldPose(ulong peerId, PlayerPoseData pose)
   {
-    var payload = PlayerPosePayload.EncodeWorldPose(peerId, pose);
     var revision = _rosterRevision;
     var recipients = new List<long>();
     foreach (var pair in _peers)
@@ -710,7 +1054,16 @@ internal sealed class MultiplayerSession : IDisposable
     foreach (var connectionId in recipients)
     {
       if (_peers.TryGetValue(connectionId, out var peer) && peer.Ready && (!_isHost || peer.SceneReady))
-        Send(connectionId, MessageKind.WorldPlayerPose, payload, DeliveryMode.Reliable);
+      {
+        var worldPayload = PlayerPosePayload.EncodeWorldPose(peerId, pose);
+        var sentUdp = peer.UdpEndPoint != null
+          && SendUdp(peer.UdpEndPoint, UdpPoseKind.WorldPose, _localPeerId, peer.UdpToken, worldPayload);
+        if (!peer.UdpPathReady || !sentUdp)
+        {
+          Send(connectionId, MessageKind.WorldPlayerPose, worldPayload, DeliveryMode.Reliable);
+        }
+      }
+
       if (_rosterRevision != revision) return;
     }
   }
@@ -729,6 +1082,7 @@ internal sealed class MultiplayerSession : IDisposable
 
     var roster = peerIds.ToArray();
     _knownPeerIds.Clear();
+    _pendingWorldPoses.Clear();
     foreach (var peerId in roster)
     {
       _knownPeerIds.Add(peerId);
@@ -771,13 +1125,13 @@ internal sealed class MultiplayerSession : IDisposable
 
   private void HandleWelcome(long connectionId, PeerState state, ProtocolMessage message)
   {
-    if (_isHost || message.Payload.Length != 1 || !state.ReceivedHello)
+    if (_isHost || !state.ReceivedHello || !WelcomePayload.TryDecode(message.Payload, out var accepted, out var token))
     {
       _transport?.Disconnect(connectionId, "Unexpected or malformed protocol welcome.");
       return;
     }
 
-    if (message.Payload[0] != 1)
+    if (!accepted)
     {
       _transport?.Disconnect(connectionId, "Host rejected the protocol handshake.");
       SetState(SessionState.Error, "Host rejected the protocol handshake.");
@@ -785,7 +1139,12 @@ internal sealed class MultiplayerSession : IDisposable
     }
 
     state.Ready = true;
+    state.UdpToken = token;
     _clientSceneReady = false;
+    _clientUdpPathReady = false;
+    _clientUdpPathPending = false;
+    _clientUdpPathPending = false;
+    _lastHostUdpSequence = 0;
     _clientSceneSyncDeadline = Now + SceneSynchronizationTimeoutSeconds;
     _clientRosterReceived = false;
     _nextHeartbeat = Now + HeartbeatIntervalSeconds;
@@ -881,24 +1240,34 @@ internal sealed class MultiplayerSession : IDisposable
     _listenPort = 0;
     _nextHeartbeat = 0;
     _sendSequence = 0;
+    _udpSendSequence = 0;
     _lastLocalPose = null;
+    _clientUdpPathReady = false;
+    _lastHostUdpSequence = 0;
+    _lastHostUdpReceiveTime = 0;
     _localPeerId = CreatePeerId();
     RosterChanged?.Invoke(Array.Empty<ulong>());
+    SceneReadinessChanged?.Invoke();
     SetState(SessionState.Offline, reason);
   }
 
   private void DisposeTransport()
   {
-    if (_transport == null)
+    if (_transport != null)
     {
-      return;
+      _transport.PeerConnected -= OnPeerConnected;
+      _transport.PacketReceived -= OnPacketReceived;
+      _transport.PeerDisconnected -= OnPeerDisconnected;
+      _transport.Dispose();
+      _transport = null;
     }
 
-    _transport.PeerConnected -= OnPeerConnected;
-    _transport.PacketReceived -= OnPacketReceived;
-    _transport.PeerDisconnected -= OnPeerDisconnected;
-    _transport.Dispose();
-    _transport = null;
+    if (_udpTransport != null)
+    {
+      _udpTransport.DatagramReceived -= OnUdpDatagramReceived;
+      _udpTransport.Dispose();
+      _udpTransport = null;
+    }
   }
 
   private void SetState(SessionState state, string status)
@@ -930,13 +1299,21 @@ internal sealed class MultiplayerSession : IDisposable
     internal string? DisconnectReason;
     internal bool HasPose;
     internal PlayerPoseData LastPose;
+    internal bool HasPendingPose;
+    internal PlayerPoseData PendingPose;
     internal double LastPoseReceiveTime;
+    internal byte[]? UdpToken;
+    internal IPEndPoint? UdpEndPoint;
+    internal bool UdpPathReady;
+    internal uint LastUdpSequence;
+    internal double LastUdpReceiveTime;
   }
 
   private void BeginHostScene(string sceneName)
   {
     _hostScene = sceneName;
     _rosterRevision++;
+    _pendingWorldPoses.Clear();
     _knownPeerIds.Clear();
     _knownPeerIds.Add(_localPeerId);
     var recipients = new List<long>();
@@ -945,6 +1322,9 @@ internal sealed class MultiplayerSession : IDisposable
       if (pair.Value.Ready)
       {
         pair.Value.SceneReady = false;
+        pair.Value.HasPose = false;
+        pair.Value.HasPendingPose = false;
+        pair.Value.LastPoseReceiveTime = 0;
         pair.Value.SceneSyncDeadline = Now + SceneSynchronizationTimeoutSeconds;
         recipients.Add(pair.Key);
       }
@@ -960,6 +1340,25 @@ internal sealed class MultiplayerSession : IDisposable
 
     Plugin.Log.LogInfo($"Host scene is now '{sceneName}'. Waiting for connected clients to load it.");
     RefreshRosterAndSnapshots();
+    SceneReadinessChanged?.Invoke();
+  }
+
+  internal void NotifyLocalSceneChanged()
+  {
+    if (!_isHost) return;
+    _hostScene = string.Empty;
+    _lastLocalPose = null;
+    _pendingWorldPoses.Clear();
+    foreach (var peer in _peers.Values)
+    {
+      if (!peer.Ready) continue;
+      peer.SceneReady = false;
+      peer.HasPose = false;
+      peer.HasPendingPose = false;
+      peer.LastPoseReceiveTime = 0;
+    }
+
+    SceneReadinessChanged?.Invoke();
   }
 
   private readonly struct RemotePoseSnapshot

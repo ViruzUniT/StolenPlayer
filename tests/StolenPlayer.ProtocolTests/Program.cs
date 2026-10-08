@@ -20,9 +20,11 @@ internal static class ProtocolCodecTests
     RoundTripsHandshakePayload();
     RejectsMalformedHandshakePayloads();
     RoundTripsPlayerPoseAndRoster();
+    UdpPoseDatagramsRoundTripAndRejectMalformedPackets();
     RoundTripsSceneNamePayload();
     StableObjectIdentityTests.RunAll();
     TcpTransportConnectsAndFramesPackets();
+    UdpPoseTransportExchangesDatagrams();
     Console.WriteLine("Protocol codec checks passed.");
   }
 
@@ -164,6 +166,26 @@ internal static class ProtocolCodecTests
     Assert(!SceneNamePayload.TryDecode(new byte[] { 4, (byte)'a' }, out _), "Truncated scene name was accepted.");
   }
 
+  private static void UdpPoseDatagramsRoundTripAndRejectMalformedPackets()
+  {
+    var token = Enumerable.Range(0, 16).Select(value => (byte)value).ToArray();
+    var payload = PlayerPosePayload.Encode(new PlayerPoseData(1, 2, 3, 90, PlayerPoseData.Moving, "MainScene"));
+    var packet = UdpPoseDatagramCodec.Encode(UdpPoseKind.ClientPose, 1234, 7, token, payload);
+    Assert(UdpPoseDatagramCodec.TryDecode(packet, out var decoded), "Valid UDP pose datagram was rejected.");
+    Assert(decoded.Kind == UdpPoseKind.ClientPose && decoded.SenderPeerId == 1234 && decoded.Sequence == 7,
+      "UDP pose header changed during round trip.");
+    Assert(decoded.Token.SequenceEqual(token) && decoded.Payload.SequenceEqual(payload), "UDP token or pose payload changed during round trip.");
+    Assert(!UdpPoseDatagramCodec.TryDecode(packet[..^1], out _), "Truncated UDP pose datagram was accepted.");
+    Assert(!UdpPoseDatagramCodec.TryDecode(new byte[UdpPoseDatagramCodec.MaximumDatagramLength + 1], out _), "Oversized UDP pose datagram was accepted.");
+
+    var accepted = WelcomePayload.EncodeAccepted(token);
+    Assert(WelcomePayload.TryDecode(accepted, out var acceptedFlag, out var decodedToken) && acceptedFlag
+      && decodedToken.SequenceEqual(token), "Accepted welcome token did not round trip.");
+    Assert(WelcomePayload.TryDecode(WelcomePayload.EncodeRejected(), out acceptedFlag, out _) && !acceptedFlag,
+      "Rejected welcome did not round trip.");
+    Assert(!WelcomePayload.TryDecode(new byte[] { 1 }, out _, out _), "Accepted welcome without a UDP token was accepted.");
+  }
+
   private static void TcpTransportConnectsAndFramesPackets()
   {
     var portProbe = new TcpListener(IPAddress.Loopback, 0);
@@ -200,11 +222,56 @@ internal static class ProtocolCodecTests
     PumpUntil(() => disconnected, host, client, 3000, "Host did not observe TCP disconnect.");
   }
 
+  private static void UdpPoseTransportExchangesDatagrams()
+  {
+    int port;
+    using (var probe = new UdpClient(0))
+    {
+      port = ((IPEndPoint)probe.Client.LocalEndPoint!).Port;
+    }
+    using var host = CreateUdpTransport();
+    using var client = CreateUdpTransport();
+    IPEndPoint? clientEndpoint = null;
+    byte[]? hostReceived = null;
+    byte[]? clientReceived = null;
+    host.DatagramReceived += (endpoint, packet) => { clientEndpoint = endpoint; hostReceived = packet; };
+    client.DatagramReceived += (_, packet) => clientReceived = packet;
+
+    Assert(host.StartHost(port, out var hostError), $"UDP listener failed: {hostError}");
+    Assert(client.StartClient("127.0.0.1", port, out var clientError), $"UDP client failed: {clientError}");
+    var outbound = new byte[] { 1, 2, 3, 4 };
+    Assert(client.Send(outbound), "UDP client send failed.");
+    PumpUdpUntil(() => hostReceived != null && clientEndpoint != null, host, client, 3000, "UDP host did not receive a datagram.");
+    Assert(hostReceived!.SequenceEqual(outbound), "UDP payload changed in transit.");
+
+    var response = new byte[] { 9, 8, 7 };
+    Assert(host.Send(response, clientEndpoint), "UDP host reply failed.");
+    PumpUdpUntil(() => clientReceived != null, host, client, 3000, "UDP client did not receive the host response.");
+    Assert(clientReceived!.SequenceEqual(response), "UDP host response changed in transit.");
+  }
+
   private static TcpTransport CreateTransport() => new TcpTransport(
     false,
     message => Console.WriteLine($"INFO: {message}"),
     message => Console.WriteLine($"WARN: {message}"),
     message => Console.WriteLine($"ERROR: {message}"));
+
+  private static UdpPoseTransport CreateUdpTransport() => new UdpPoseTransport(
+    message => Console.WriteLine($"WARN: {message}"),
+    message => Console.WriteLine($"ERROR: {message}"));
+
+  private static void PumpUdpUntil(Func<bool> condition, UdpPoseTransport first, UdpPoseTransport second, int timeoutMilliseconds, string error)
+  {
+    var timer = Stopwatch.StartNew();
+    while (!condition() && timer.ElapsedMilliseconds < timeoutMilliseconds)
+    {
+      first.Update();
+      second.Update();
+      Thread.Sleep(2);
+    }
+
+    Assert(condition(), error);
+  }
 
   private static void PumpUntil(Func<bool> condition, TcpTransport first, TcpTransport second, int timeoutMilliseconds, string error)
   {

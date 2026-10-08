@@ -10,7 +10,7 @@ namespace StolenPlayer
   {
     public const string PluginGuid = "dev.viruzunit.stolenplayer";
     public const string PluginName = "StolenPlayer";
-    public const string PluginVersion = "0.6.3";
+    public const string PluginVersion = "0.7.0";
 
     internal static ManualLogSource Log { get; private set; } = null!;
 
@@ -33,7 +33,7 @@ namespace StolenPlayer
         _runtimeObject.AddComponent<MultiplayerRuntime>().Initialize(_config);
 
         Log.LogInfo($"{PluginName} {PluginVersion} initialized.");
-        Log.LogInfo($"Configured direct IP session capacity: {_config.MaxPlayers.Value}; TCP port: {_config.ListenPort.Value}.");
+        Log.LogInfo($"Configured direct IP session capacity: {_config.MaxPlayers.Value}; TCP/UDP port: {_config.ListenPort.Value}.");
       }
       catch (Exception exception)
       {

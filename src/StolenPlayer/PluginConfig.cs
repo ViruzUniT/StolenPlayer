@@ -7,11 +7,17 @@ internal sealed class PluginConfig
   private PluginConfig(
     ConfigEntry<int> listenPort,
     ConfigEntry<int> maxPlayers,
-    ConfigEntry<bool> verboseNetworking)
+    ConfigEntry<bool> verboseNetworking,
+    ConfigEntry<string> idleAnimationNames,
+    ConfigEntry<string> walkAnimationName,
+    ConfigEntry<string> runAnimationName)
   {
     ListenPort = listenPort;
     MaxPlayers = maxPlayers;
     VerboseNetworking = verboseNetworking;
+    IdleAnimationNames = idleAnimationNames;
+    WalkAnimationName = walkAnimationName;
+    RunAnimationName = runAnimationName;
   }
 
   internal ConfigEntry<int> ListenPort { get; }
@@ -20,6 +26,12 @@ internal sealed class PluginConfig
 
   internal ConfigEntry<bool> VerboseNetworking { get; }
 
+  internal ConfigEntry<string> IdleAnimationNames { get; }
+
+  internal ConfigEntry<string> WalkAnimationName { get; }
+
+  internal ConfigEntry<string> RunAnimationName { get; }
+
   internal static PluginConfig Bind(ConfigFile config)
   {
     var listenPort = config.Bind(
@@ -27,7 +39,7 @@ internal sealed class PluginConfig
       "Port",
       27960,
       new ConfigDescription(
-        "TCP port used for direct IP multiplayer. Internet clients may require a router firewall/port-forward rule.",
+        "TCP control and UDP movement use this port. Internet clients may need a router firewall/port-forward rule for both protocols.",
         new AcceptableValueRange<int>(1024, 65535)));
 
     var maxPlayers = config.Bind(
@@ -44,6 +56,25 @@ internal sealed class PluginConfig
       false,
       "Enables detailed diagnostics for direct IP networking.");
 
-    return new PluginConfig(listenPort, maxPlayers, verboseNetworking);
+    var idleAnimationNames = config.Bind(
+      "PlayerAnimations",
+      "IdleAnimationNames",
+      "BreatheIdle,Idle,Idle_Stand,IdleStanding,StandingIdle,Stand,Bored",
+      "Comma-separated exact idle clip names in preference order. The first matching animation state is played as the remote player's idle.");
+
+    var walkAnimationName = config.Bind(
+      "PlayerAnimations",
+      "WalkAnimationName",
+      "Walk",
+      "Animation state used for a remote player who is walking or crouch-moving.");
+
+    var runAnimationName = config.Bind(
+      "PlayerAnimations",
+      "RunAnimationName",
+      "Running",
+      "Animation state used for a remote player who is running.");
+
+    return new PluginConfig(listenPort, maxPlayers, verboseNetworking,
+      idleAnimationNames, walkAnimationName, runAnimationName);
   }
 }

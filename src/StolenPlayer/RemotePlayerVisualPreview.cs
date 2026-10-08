@@ -8,9 +8,7 @@ namespace StolenPlayer;
 internal static class RemotePlayerVisualPreview
 {
   private const string VerifiedTemplateSuffix = "NPCs/101/NPC";
-  private static readonly string[] IdleClipCandidates = { "Idle", "Idle_Stand", "IdleStanding", "StandingIdle", "Stand", "StandUp", "Bored" };
-
-  internal static bool TryCreate(Camera? camera, out GameObject? preview, out string error)
+  internal static bool TryCreate(Camera? camera, PluginConfig config, out GameObject? preview, out string error)
   {
     preview = null;
     error = string.Empty;
@@ -25,10 +23,11 @@ internal static class RemotePlayerVisualPreview
     forward.Normalize();
     var position = camera.transform.position + forward * 2.5f - Vector3.up * 1.25f;
     return TryCreateAt(position, Quaternion.LookRotation(forward, Vector3.up).eulerAngles.y,
-      "StolenPlayer Remote Player Visual Preview", out preview, out error);
+      "StolenPlayer Remote Player Visual Preview", config, out preview, out error);
   }
 
-  internal static bool TryCreateAt(Vector3 position, float yaw, string objectName, out GameObject? avatar, out string error)
+  internal static bool TryCreateAt(Vector3 position, float yaw, string objectName, PluginConfig config,
+    out GameObject? avatar, out string error)
   {
     avatar = null;
     error = string.Empty;
@@ -140,7 +139,8 @@ internal static class RemotePlayerVisualPreview
         return false;
       }
 
-      var hasIdleClip = TryGetIdleClip(legacyAnimation, out var idleClipName, out var availableClips);
+      var hasIdleClip = TryGetIdleClip(legacyAnimation, config.IdleAnimationNames.Value,
+        out var idleClipName, out var availableClips);
       var idleClip = idleClipName == null ? null : legacyAnimation.GetClip(idleClipName);
       var idleState = idleClipName == null ? null : legacyAnimation[idleClipName];
       if (!hasIdleClip || idleClip == null || idleState == null)
@@ -156,14 +156,10 @@ internal static class RemotePlayerVisualPreview
       staging = null;
       clone.transform.position = position;
       clone.transform.rotation = Quaternion.Euler(0, yaw, 0);
-      clone.AddComponent<RemotePlayerAvatar>().Initialize(legacyAnimation);
-      clone.SetActive(true);
-      legacyAnimation.enabled = true;
       legacyAnimation.cullingType = AnimationCullingType.AlwaysAnimate;
-
       legacyAnimation.wrapMode = WrapMode.Loop;
-      idleState.wrapMode = WrapMode.ClampForever;
-      legacyAnimation.Play(idleClipName!);
+      clone.AddComponent<RemotePlayerAvatar>().Initialize(legacyAnimation, config);
+      clone.SetActive(true);
 
       avatar = clone;
       var visibleParts = template.GameObject.GetComponentsInChildren<SkinnedMeshRenderer>(true)
@@ -193,7 +189,8 @@ internal static class RemotePlayerVisualPreview
     }
   }
 
-  internal static bool TryGetIdleClip(Animation animation, out string clipName, out string availableClips)
+  internal static bool TryGetIdleClip(Animation animation, string configuredCandidates,
+    out string clipName, out string availableClips)
   {
     var stateNames = new List<string>();
     var enumerator = animation.GetEnumerator();
@@ -206,15 +203,25 @@ internal static class RemotePlayerVisualPreview
     }
 
     availableClips = stateNames.Count == 0 ? "<none>" : string.Join(", ", stateNames);
-    foreach (var candidate in IdleClipCandidates)
+    stateNames.Sort(StringComparer.OrdinalIgnoreCase);
+    var candidates = (configuredCandidates ?? string.Empty).Split(',');
+    foreach (var rawCandidate in candidates)
     {
+      var candidate = rawCandidate.Trim();
+      if (candidate.Length == 0) continue;
+      var matches = new List<string>();
       foreach (var stateName in stateNames)
       {
         if (string.Equals(candidate, stateName, StringComparison.OrdinalIgnoreCase))
         {
-          clipName = stateName;
-          return true;
+          matches.Add(stateName);
         }
+      }
+
+      if (matches.Count > 0)
+      {
+        clipName = matches[0];
+        return true;
       }
     }
 

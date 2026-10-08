@@ -31,8 +31,9 @@ internal sealed class MultiplayerRuntime : MonoBehaviour
     _session = new MultiplayerSession(config, Application.version, Plugin.PluginVersion);
     _session.HostSceneReceived += OnHostSceneReceived;
     _session.HostPoseReceived += OnHostPoseReceived;
+    SceneManager.activeSceneChanged += OnActiveSceneChanged;
     _remotePlayers = gameObject.AddComponent<RemotePlayerManager>();
-    _remotePlayers.Initialize(_session);
+    _remotePlayers.Initialize(_session, config);
     gameObject.AddComponent<StaticWorldIdentityScanner>();
     _window = _initialWindow;
     _portInput = config.ListenPort.Value.ToString();
@@ -94,7 +95,13 @@ internal sealed class MultiplayerRuntime : MonoBehaviour
       return;
     }
 
-    if (RemotePlayerVisualPreview.TryCreate(Camera.main, out var preview, out var error))
+    if (_config == null)
+    {
+      Plugin.Log.LogWarning("Cannot create the visual preview because plugin configuration is unavailable.");
+      return;
+    }
+
+    if (RemotePlayerVisualPreview.TryCreate(Camera.main, _config, out var preview, out var error))
     {
       _visualPreview = preview;
       return;
@@ -129,7 +136,7 @@ internal sealed class MultiplayerRuntime : MonoBehaviour
     }
     else if (state == SessionState.Offline)
     {
-      GUILayout.Label("TCP port");
+        GUILayout.Label("Session port (TCP + UDP movement)");
       _portInput = GUILayout.TextField(_portInput, 5);
       var validPort = int.TryParse(_portInput, out var port) && port >= 1024 && port <= 65535;
       GUI.enabled = validPort;
@@ -149,14 +156,14 @@ internal sealed class MultiplayerRuntime : MonoBehaviour
 
       GUILayout.EndHorizontal();
       GUI.enabled = true;
-      GUILayout.Label("Clients enter the host's IP and TCP port.");
-      GUILayout.Label("Internet play may need port forwarding and firewall access.");
+      GUILayout.Label("Clients enter the host's IP and session port.");
+      GUILayout.Label("Internet play may need TCP and UDP port forwarding/firewall rules.");
     }
     else
     {
       if (_session?.IsHost == true)
       {
-        GUILayout.Label($"Listening on TCP port {_session.ListenPort}");
+        GUILayout.Label($"Listening on TCP + UDP port {_session.ListenPort}");
       }
 
       GUILayout.Label($"Ready peers: {_session?.ReadyPeerCount ?? 0}");
@@ -172,6 +179,7 @@ internal sealed class MultiplayerRuntime : MonoBehaviour
 
   private void DisposeSession()
   {
+    SceneManager.activeSceneChanged -= OnActiveSceneChanged;
     if (_session != null)
     {
       _session.HostSceneReceived -= OnHostSceneReceived;
@@ -180,6 +188,11 @@ internal sealed class MultiplayerRuntime : MonoBehaviour
 
     _session?.Dispose();
     _session = null;
+  }
+
+  private void OnActiveSceneChanged(Scene previous, Scene current)
+  {
+    _session?.NotifyLocalSceneChanged();
   }
 
   private void OnHostSceneReceived(string sceneName)

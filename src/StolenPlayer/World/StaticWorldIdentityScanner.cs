@@ -62,7 +62,7 @@ internal sealed class StaticWorldIdentityScanner : MonoBehaviour
       var scene = door.gameObject.scene;
       var sceneIdentity = string.Concat(
         scene.buildIndex.ToString(CultureInfo.InvariantCulture), ":", scene.name, ":", scene.path);
-      if (!StableObjectKey.TryCreate(GetBuildIdentity(), sceneIdentity, GetHierarchyPath(door.transform),
+      if (!StableObjectKey.TryCreate(GetBuildIdentity(), sceneIdentity, GetHierarchyPath(door),
           door.GetType().FullName ?? nameof(Door), out var key, out var keyError))
       {
         Plugin.Log.LogWarning($"Could not identify door in scene '{scene.name}': {keyError}");
@@ -71,7 +71,7 @@ internal sealed class StaticWorldIdentityScanner : MonoBehaviour
 
       if (!_registry.TryRegister(key, door, out var registrationError))
       {
-        Plugin.Log.LogError($"Door identity rejected in scene '{scene.name}' at '{GetHierarchyPath(door.transform)}': {registrationError}");
+        Plugin.Log.LogError($"Door identity rejected in scene '{scene.name}' at '{GetHierarchyPath(door)}': {registrationError}");
         continue;
       }
 
@@ -92,12 +92,12 @@ internal sealed class StaticWorldIdentityScanner : MonoBehaviour
     return string.Concat(Application.productName, "/", version);
   }
 
-  private static string GetHierarchyPath(Transform target)
+  private static string GetHierarchyPath(Door target)
   {
     var names = new List<string>();
-    for (var current = target; current != null; current = current.parent)
+    for (var current = target.transform; current != null; current = current.parent)
     {
-      names.Add(current.name);
+      names.Add(string.Concat(current.GetSiblingIndex().ToString(CultureInfo.InvariantCulture), "#", current.name));
     }
 
     names.Reverse();
@@ -107,6 +107,19 @@ internal sealed class StaticWorldIdentityScanner : MonoBehaviour
       // Length-prefix each segment so a slash in an object name cannot alias a child boundary.
       path.Append(name.Length).Append(':').Append(name);
     }
+
+    var componentOrdinal = 0;
+    foreach (var component in target.GetComponents<Door>())
+    {
+      if (ReferenceEquals(component, target))
+      {
+        break;
+      }
+
+      componentOrdinal++;
+    }
+
+    path.Append("component:").Append(componentOrdinal.ToString(CultureInfo.InvariantCulture));
 
     return path.ToString();
   }
