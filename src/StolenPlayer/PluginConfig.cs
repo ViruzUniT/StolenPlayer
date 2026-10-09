@@ -59,8 +59,8 @@ internal sealed class PluginConfig
     var idleAnimationNames = config.Bind(
       "PlayerAnimations",
       "IdleAnimationNames",
-      "BreatheIdle,Idle,Idle_Stand,IdleStanding,StandingIdle,Stand,Bored",
-      "Comma-separated exact idle clip names in preference order. The first matching animation state is played as the remote player's idle.");
+      "Idle,BreatheIdle,Idle_Stand,IdleStanding,StandingIdle,Stand,Bored",
+      "Comma-separated exact legacy Animation clip names in preference order. The first matching state is played as the remote player's idle.");
 
     var walkAnimationName = config.Bind(
       "PlayerAnimations",
