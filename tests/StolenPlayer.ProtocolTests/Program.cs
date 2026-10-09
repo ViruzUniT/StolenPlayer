@@ -23,6 +23,7 @@ internal static class ProtocolCodecTests
     UdpPoseDatagramsRoundTripAndRejectMalformedPackets();
     RoundTripsSceneNamePayload();
     DoorInteractionPayloadRoundTripsAndRejectsMalformedData();
+    DoorSnapshotPayloadRoundTripsAndRejectsMalformedData();
     StableObjectIdentityTests.RunAll();
     TcpTransportConnectsAndFramesPackets();
     UdpPoseTransportExchangesDatagrams();
@@ -206,6 +207,22 @@ internal static class ProtocolCodecTests
     malformed[18] = (byte)'/';
     Assert(!DoorInteractionPayload.TryDecode(malformed, out _), "Door interaction scene path was accepted.");
     Assert(!DoorInteractionPayload.TryDecode(Array.Empty<byte>(), out _), "Empty door interaction payload was accepted.");
+  }
+
+  private static void DoorSnapshotPayloadRoundTripsAndRejectsMalformedData()
+  {
+    foreach (var count in new[] { 0, 1, DoorSnapshotPayload.MaximumEntries })
+    {
+      var payload = DoorSnapshotPayload.Encode("MadisonSt", count);
+      Assert(DoorSnapshotPayload.TryDecode(payload, out var marker), "Valid door snapshot marker was rejected.");
+      Assert(marker.SceneName == "MadisonSt" && marker.EntryCount == count, "Door snapshot marker changed fields during round trip.");
+    }
+
+    var malformed = DoorSnapshotPayload.Encode("MainScene", 2);
+    malformed[0] = 0xFF;
+    malformed[1] = 0xFF;
+    Assert(!DoorSnapshotPayload.TryDecode(malformed, out _), "Oversized door snapshot count was accepted.");
+    Assert(!DoorSnapshotPayload.TryDecode(Array.Empty<byte>(), out _), "Empty door snapshot marker was accepted.");
   }
 
   private static void UdpPoseDatagramsRoundTripAndRejectMalformedPackets()

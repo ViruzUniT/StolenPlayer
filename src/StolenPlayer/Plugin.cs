@@ -10,7 +10,7 @@ namespace StolenPlayer
   {
     public const string PluginGuid = "dev.viruzunit.stolenplayer";
     public const string PluginName = "StolenPlayer";
-    public const string PluginVersion = "0.8.5";
+    public const string PluginVersion = "0.8.6";
 
     internal static ManualLogSource Log { get; private set; } = null!;
 

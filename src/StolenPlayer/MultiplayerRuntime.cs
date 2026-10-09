@@ -81,6 +81,7 @@ internal sealed class MultiplayerRuntime : MonoBehaviour
     _session?.Update();
     UpdateClientSceneSynchronization();
     ApplyPendingHostSpawn();
+    if (!_requiresHostSpawn) _session?.CompleteClientInitialSynchronization();
     if (_session != null && Time.unscaledTime >= _nextPosePublishTime
         && (_session.IsHost || _session.ReadyPeerCount > 0)
         && _playerStateReader.TryRead(out var pose))

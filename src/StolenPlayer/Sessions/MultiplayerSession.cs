@@ -62,6 +62,10 @@ internal sealed class MultiplayerSession : IDisposable
   private double _clientSceneSyncDeadline;
   private bool _clientSceneReady;
   private bool _clientWorldReady;
+  private bool _clientDoorSnapshotActive;
+  private bool _clientDoorSnapshotComplete;
+  private int _clientDoorSnapshotExpected;
+  private int _clientDoorSnapshotReceived;
   private bool _clientRosterReceived;
   private bool _clientUdpPathReady;
   private bool _clientUdpPathPending;
@@ -71,6 +75,7 @@ internal sealed class MultiplayerSession : IDisposable
   internal event Action<PlayerIdentityData[]>? RosterChanged;
   internal event Action<ulong, PlayerPoseData>? PlayerPoseReceived;
   internal event Action? SceneReadinessChanged;
+  internal event Action<long, string>? PeerSceneReady;
   internal event Action<string>? HostSceneReceived;
   internal event Action<PlayerPoseData>? HostPoseReceived;
   internal event Action<long, Guid, string, bool>? DoorIntentReceived;
@@ -148,6 +153,51 @@ internal sealed class MultiplayerSession : IDisposable
           && string.Equals(peer.LastPose.SceneName, sceneName, StringComparison.Ordinal))
         Send(connectionId, MessageKind.DoorState, payload, DeliveryMode.Reliable);
     }
+  }
+
+  internal bool SendDoorSnapshot(long connectionId, string sceneName, DoorStateSnapshot[] entries)
+  {
+    if (_disposed || !_isHost || entries == null
+        || !_peers.TryGetValue(connectionId, out var peer) || !peer.Ready || !peer.SceneReady)
+      return false;
+
+    if (entries.Length > DoorSnapshotPayload.MaximumEntries)
+    {
+      _transport?.Disconnect(connectionId, $"Door snapshot exceeds {DoorSnapshotPayload.MaximumEntries} entries.");
+      return false;
+    }
+    if (string.IsNullOrWhiteSpace(sceneName) || !string.Equals(sceneName, _hostScene, StringComparison.Ordinal))
+    {
+      _transport?.Disconnect(connectionId, "Host world scene changed before its door snapshot could be sent.");
+      return false;
+    }
+
+    var marker = DoorSnapshotPayload.Encode(sceneName, entries.Length);
+    if (!Send(connectionId, MessageKind.DoorSnapshotBegin, marker, DeliveryMode.Reliable))
+      return AbortDoorSnapshot(connectionId, "Could not send door snapshot start.");
+    foreach (var entry in entries)
+    {
+      if (entry.Key == Guid.Empty)
+      {
+        _transport?.Disconnect(connectionId, "Host door snapshot contained an empty object identity.");
+        return false;
+      }
+      var action = entry.IsSlow ? (entry.IsOpen ? (byte)5 : (byte)4) : (entry.IsOpen ? (byte)2 : (byte)1);
+      if (!Send(connectionId, MessageKind.DoorSnapshotEntry,
+          DoorInteractionPayload.Encode(entry.Key, sceneName, action), DeliveryMode.Reliable))
+        return AbortDoorSnapshot(connectionId, "Could not send every door snapshot entry.");
+    }
+
+    if (!Send(connectionId, MessageKind.DoorSnapshotComplete, marker, DeliveryMode.Reliable))
+      return AbortDoorSnapshot(connectionId, "Could not send door snapshot completion marker.");
+    Plugin.Log.LogInfo($"Sent authoritative door snapshot to peer {peer.RemotePeerId}: {entries.Length} supported doors in '{sceneName}'.");
+    return true;
+  }
+
+  private bool AbortDoorSnapshot(long connectionId, string reason)
+  {
+    _transport?.Disconnect(connectionId, reason);
+    return false;
   }
 
   internal bool TryGetPeerPose(long connectionId, out PlayerPoseData pose)
@@ -544,6 +594,15 @@ internal sealed class MultiplayerSession : IDisposable
       case MessageKind.DoorState:
         HandleDoorState(state, message);
         break;
+      case MessageKind.DoorSnapshotBegin:
+        HandleDoorSnapshotBegin(peer.ConnectionId, state, message);
+        break;
+      case MessageKind.DoorSnapshotEntry:
+        HandleDoorSnapshotEntry(peer.ConnectionId, state, message);
+        break;
+      case MessageKind.DoorSnapshotComplete:
+        HandleDoorSnapshotComplete(peer.ConnectionId, state, message);
+        break;
       case MessageKind.Disconnect:
         _transport?.Disconnect(peer.ConnectionId, "Peer closed the session.");
         break;
@@ -583,6 +642,56 @@ internal sealed class MultiplayerSession : IDisposable
     }
 
     DoorStateReceived?.Invoke(update.Key, update.SceneName, update.IsOpen, update.IsSlow);
+  }
+
+  private void HandleDoorSnapshotBegin(long connectionId, PeerState state, ProtocolMessage message)
+  {
+    if (_isHost || !state.Ready || state.RemotePeerId != HostPeerId || !_clientSceneReady
+        || _clientDoorSnapshotActive || _clientDoorSnapshotComplete
+        || !DoorSnapshotPayload.TryDecode(message.Payload, out var marker)
+        || !string.Equals(marker.SceneName, _expectedHostScene, StringComparison.Ordinal))
+    {
+      _transport?.Disconnect(connectionId, "Unexpected or malformed authoritative door snapshot start.");
+      return;
+    }
+
+    _clientDoorSnapshotActive = true;
+    _clientDoorSnapshotExpected = marker.EntryCount;
+    _clientDoorSnapshotReceived = 0;
+    Plugin.Log.LogInfo($"Receiving authoritative door snapshot for '{marker.SceneName}' ({marker.EntryCount} doors).");
+  }
+
+  private void HandleDoorSnapshotEntry(long connectionId, PeerState state, ProtocolMessage message)
+  {
+    if (_isHost || !state.Ready || state.RemotePeerId != HostPeerId || !_clientDoorSnapshotActive
+        || !DoorInteractionPayload.TryDecode(message.Payload, out var entry)
+        || (entry.Action != 1 && entry.Action != 2 && entry.Action != 4 && entry.Action != 5)
+        || !string.Equals(entry.SceneName, _expectedHostScene, StringComparison.Ordinal)
+        || _clientDoorSnapshotReceived >= _clientDoorSnapshotExpected)
+    {
+      _transport?.Disconnect(connectionId, "Unexpected or malformed authoritative door snapshot entry.");
+      return;
+    }
+
+    _clientDoorSnapshotReceived++;
+    DoorStateReceived?.Invoke(entry.Key, entry.SceneName, entry.IsOpen, entry.IsSlow);
+  }
+
+  private void HandleDoorSnapshotComplete(long connectionId, PeerState state, ProtocolMessage message)
+  {
+    if (_isHost || !state.Ready || state.RemotePeerId != HostPeerId || !_clientDoorSnapshotActive
+        || !DoorSnapshotPayload.TryDecode(message.Payload, out var marker)
+        || !string.Equals(marker.SceneName, _expectedHostScene, StringComparison.Ordinal)
+        || marker.EntryCount != _clientDoorSnapshotExpected
+        || _clientDoorSnapshotReceived != _clientDoorSnapshotExpected)
+    {
+      _transport?.Disconnect(connectionId, "Authoritative door snapshot was incomplete or inconsistent.");
+      return;
+    }
+
+    _clientDoorSnapshotActive = false;
+    _clientDoorSnapshotComplete = true;
+    Plugin.Log.LogInfo($"Applied authoritative door snapshot for '{marker.SceneName}' ({_clientDoorSnapshotReceived} doors).");
   }
 
   private void HandleHello(long connectionId, PeerState state, ProtocolMessage message)
@@ -786,6 +895,10 @@ internal sealed class MultiplayerSession : IDisposable
     _clientSceneSyncDeadline = Now + SceneSynchronizationTimeoutSeconds;
     _clientSceneReady = false;
     _clientWorldReady = false;
+    _clientDoorSnapshotActive = false;
+    _clientDoorSnapshotComplete = false;
+    _clientDoorSnapshotExpected = 0;
+    _clientDoorSnapshotReceived = 0;
     _clientRosterReceived = false;
     _pendingWorldPoses.Clear();
     _knownPeerIds.Clear();
@@ -825,6 +938,7 @@ internal sealed class MultiplayerSession : IDisposable
     RefreshRosterAndSnapshots();
     if (hasPendingPose) AcceptClientPose(state, pendingPose);
     SceneReadinessChanged?.Invoke();
+    PeerSceneReady?.Invoke(connectionId, sceneName);
   }
 
   private void HandleUdpPathReady(long connectionId, PeerState state, ProtocolMessage message)
@@ -1071,7 +1185,7 @@ internal sealed class MultiplayerSession : IDisposable
       if (pair.Value.Ready)
       {
         Send(pair.Key, MessageKind.ClientSceneReady, SceneNamePayload.Encode(sceneName), DeliveryMode.Reliable);
-        Plugin.Log.LogInfo($"Client loaded authoritative host scene '{sceneName}'. Waiting for the host's initial player roster.");
+        Plugin.Log.LogInfo($"Client loaded authoritative host scene '{sceneName}'. Waiting for the host's roster, spawn pose, and world snapshot.");
         return true;
       }
     }
@@ -1088,10 +1202,13 @@ internal sealed class MultiplayerSession : IDisposable
       return false;
     }
 
+    if (_clientWorldReady) return true;
+    if (!_clientDoorSnapshotComplete) return false;
+
     _clientWorldReady = true;
     _clientSceneSyncDeadline = 0;
-    SetState(SessionState.Connected, "Host scene, spawn position, and player roster synchronized.");
-    Plugin.Log.LogInfo("Client initial synchronization complete; enabling player pose replication.");
+    SetState(SessionState.Connected, "Host scene, spawn position, player roster, and door world state synchronized.");
+    Plugin.Log.LogInfo("Client initial synchronization complete, including door state; enabling player pose replication.");
     foreach (var pair in _pendingWorldPoses)
     {
       if (pair.Key != _localPeerId && _knownPeerIds.Contains(pair.Key)
@@ -1317,11 +1434,11 @@ internal sealed class MultiplayerSession : IDisposable
     }
   }
 
-  private void Send(long connectionId, MessageKind kind, byte[] payload, DeliveryMode deliveryMode)
+  private bool Send(long connectionId, MessageKind kind, byte[] payload, DeliveryMode deliveryMode)
   {
     if (_transport == null || _localPeerId == 0)
     {
-      return;
+      return false;
     }
 
     _sendSequence++;
@@ -1337,12 +1454,15 @@ internal sealed class MultiplayerSession : IDisposable
       if (!_transport.Send(connectionId, packet, deliveryMode, out var error))
       {
         Plugin.Log.LogWarning(error);
+        return false;
       }
+      return true;
     }
     catch (Exception exception)
     {
       Plugin.Log.LogError($"Could not encode {kind} message: {exception}");
       _transport.Disconnect(connectionId, "Local protocol encoding failed.");
+      return false;
     }
   }
 
@@ -1363,6 +1483,10 @@ internal sealed class MultiplayerSession : IDisposable
     _clientSceneSyncDeadline = 0;
     _clientSceneReady = false;
     _clientWorldReady = false;
+    _clientDoorSnapshotActive = false;
+    _clientDoorSnapshotComplete = false;
+    _clientDoorSnapshotExpected = 0;
+    _clientDoorSnapshotReceived = 0;
     _clientRosterReceived = false;
     _pendingError = null;
     _isHost = false;

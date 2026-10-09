@@ -44,6 +44,20 @@ internal sealed class StaticWorldIdentityScanner : MonoBehaviour
     return false;
   }
 
+  internal int DoorCount => _doors.Count;
+
+  internal bool TryGetDoorAt(int index, out Guid key, out Door? door)
+  {
+    key = Guid.Empty;
+    door = null;
+    if (index < 0 || index >= _doors.Count) return false;
+    var entry = _doors[index];
+    if (entry.Door == null) return false;
+    key = entry.Key.Value;
+    door = entry.Door;
+    return true;
+  }
+
   internal bool TryGetDoor(StableObjectKey key, out Door? door) => _registry.TryGet(key, out door);
   internal bool TryGetDoor(Guid key, out Door? door) => _registry.TryGet(key, out door);
 

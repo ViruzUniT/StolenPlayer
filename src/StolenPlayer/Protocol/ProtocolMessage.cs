@@ -18,7 +18,66 @@ internal enum MessageKind : byte
   ClientSceneReady = 10,
   UdpPathReady = 11,
   DoorIntent = 12,
-  DoorState = 13
+  DoorState = 13,
+  DoorSnapshotBegin = 14,
+  DoorSnapshotEntry = 15,
+  DoorSnapshotComplete = 16
+}
+
+internal readonly struct DoorStateSnapshot
+{
+  internal DoorStateSnapshot(Guid key, bool isOpen, bool isSlow)
+  {
+    Key = key;
+    IsOpen = isOpen;
+    IsSlow = isSlow;
+  }
+
+  internal Guid Key { get; }
+  internal bool IsOpen { get; }
+  internal bool IsSlow { get; }
+}
+
+internal readonly struct DoorSnapshotMarker
+{
+  internal DoorSnapshotMarker(string sceneName, int entryCount)
+  {
+    SceneName = sceneName;
+    EntryCount = entryCount;
+  }
+
+  internal string SceneName { get; }
+  internal int EntryCount { get; }
+}
+
+internal static class DoorSnapshotPayload
+{
+  internal const int MaximumEntries = 4096;
+
+  internal static byte[] Encode(string sceneName, int entryCount)
+  {
+    if (entryCount < 0 || entryCount > MaximumEntries)
+      throw new ArgumentOutOfRangeException(nameof(entryCount));
+    var scenePayload = SceneNamePayload.Encode(sceneName);
+    var payload = new byte[sizeof(ushort) + scenePayload.Length];
+    payload[0] = (byte)entryCount;
+    payload[1] = (byte)(entryCount >> 8);
+    Array.Copy(scenePayload, 0, payload, sizeof(ushort), scenePayload.Length);
+    return payload;
+  }
+
+  internal static bool TryDecode(byte[] payload, out DoorSnapshotMarker marker)
+  {
+    marker = default;
+    if (payload == null || payload.Length < sizeof(ushort) + 2) return false;
+    var count = payload[0] | (payload[1] << 8);
+    if (count > MaximumEntries) return false;
+    var scenePayload = new byte[payload.Length - sizeof(ushort)];
+    Array.Copy(payload, sizeof(ushort), scenePayload, 0, scenePayload.Length);
+    if (!SceneNamePayload.TryDecode(scenePayload, out var sceneName)) return false;
+    marker = new DoorSnapshotMarker(sceneName, count);
+    return true;
+  }
 }
 
 internal readonly struct DoorInteractionData
@@ -593,7 +652,7 @@ internal readonly struct ProtocolMessage
 internal static class ProtocolCodec
 {
   internal const uint Magic = 0x43504C53; // "SLPC" in little-endian bytes.
-  internal const ushort CurrentVersion = 7;
+  internal const ushort CurrentVersion = 8;
   internal const int HeaderLength = 19;
   internal const int MaximumMessageSize = 64 * 1024;
 

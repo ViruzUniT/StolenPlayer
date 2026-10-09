@@ -32,6 +32,7 @@ internal sealed class DoorInteractionReplicator : MonoBehaviour
     Current = this;
     session.DoorIntentReceived += OnDoorIntent;
     session.DoorStateReceived += OnDoorState;
+    session.PeerSceneReady += OnPeerSceneReady;
     if (OpenSpeedField == null)
       Plugin.Log.LogError("Could not find Door.openSpeed; replicated door animations will be disabled.");
   }
@@ -42,6 +43,7 @@ internal sealed class DoorInteractionReplicator : MonoBehaviour
     {
       _session.DoorIntentReceived -= OnDoorIntent;
       _session.DoorStateReceived -= OnDoorState;
+      _session.PeerSceneReady -= OnPeerSceneReady;
     }
     if (Current == this) Current = null;
     _lastRequestedAt.Clear();
@@ -147,6 +149,23 @@ internal sealed class DoorInteractionReplicator : MonoBehaviour
     }
     _session.BroadcastDoorState(key, sceneName, door.isOpen, isSlow);
     Plugin.Log.LogInfo($"Host applied door toggle {key:N}; open={door.isOpen}.");
+  }
+
+  private void OnPeerSceneReady(long connectionId, string sceneName)
+  {
+    if (_session == null || !_session.IsHost || _identities == null
+        || !string.Equals(SceneManager.GetActiveScene().name, sceneName, StringComparison.Ordinal)) return;
+
+    var snapshot = new List<DoorStateSnapshot>();
+    for (var index = 0; index < _identities.DoorCount; index++)
+    {
+      if (!_identities.TryGetDoorAt(index, out var key, out var door) || door == null
+          || !IsStandardDoorKind(door)) continue;
+      snapshot.Add(new DoorStateSnapshot(key, door.isOpen, door.openingSlowly));
+    }
+
+    if (!_session.SendDoorSnapshot(connectionId, sceneName, snapshot.ToArray()))
+      Plugin.Log.LogWarning($"Could not send initial door snapshot to connection {connectionId} for '{sceneName}'.");
   }
 
   private void OnDoorState(Guid key, string sceneName, bool isOpen, bool isSlow)
