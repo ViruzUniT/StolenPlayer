@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Text;
 
 namespace StolenPlayer.Protocol;
@@ -15,7 +16,66 @@ internal enum MessageKind : byte
   PlayerRoster = 8,
   HostScene = 9,
   ClientSceneReady = 10,
-  UdpPathReady = 11
+  UdpPathReady = 11,
+  DoorIntent = 12,
+  DoorState = 13
+}
+
+internal readonly struct DoorInteractionData
+{
+  internal DoorInteractionData(Guid key, string sceneName, byte action)
+  {
+    Key = key;
+    SceneName = sceneName;
+    Action = action;
+  }
+
+  internal Guid Key { get; }
+  internal string SceneName { get; }
+  // Intent action 0 means toggle; authoritative state actions 1 and 2 mean closed and open.
+  internal byte Action { get; }
+}
+
+internal static class DoorInteractionPayload
+{
+  private const int FixedLength = 18;
+  private const int MaximumSceneNameBytes = 128;
+  private static readonly UTF8Encoding StrictUtf8 = new UTF8Encoding(false, true);
+
+  internal static byte[] Encode(Guid key, string sceneName, byte action)
+  {
+    var sceneBytes = Encoding.UTF8.GetBytes(sceneName ?? string.Empty);
+    if (key == Guid.Empty || sceneBytes.Length == 0 || sceneBytes.Length > MaximumSceneNameBytes
+        || action > 2)
+      throw new ArgumentException("Door interaction fields are invalid.");
+
+    var payload = new byte[FixedLength + sceneBytes.Length];
+    Array.Copy(key.ToByteArray(), payload, 16);
+    payload[16] = action;
+    payload[17] = (byte)sceneBytes.Length;
+    Array.Copy(sceneBytes, 0, payload, FixedLength, sceneBytes.Length);
+    return payload;
+  }
+
+  internal static bool TryDecode(byte[] payload, out DoorInteractionData interaction)
+  {
+    interaction = default;
+    if (payload == null || payload.Length < FixedLength + 1
+        || payload.Length > FixedLength + MaximumSceneNameBytes
+        || payload[16] > 2 || payload[17] == 0
+        || payload.Length != FixedLength + payload[17]) return false;
+    var key = new Guid(payload.Take(16).ToArray());
+    if (key == Guid.Empty) return false;
+    try
+    {
+      var sceneName = StrictUtf8.GetString(payload, FixedLength, payload[17]);
+      if (string.IsNullOrWhiteSpace(sceneName) || sceneName.Contains("..")
+          || sceneName.Contains("/") || sceneName.Contains("\\")) return false;
+      interaction = new DoorInteractionData(key, sceneName, payload[16]);
+      return true;
+    }
+    catch (DecoderFallbackException) { return false; }
+  }
 }
 
 internal enum UdpPoseKind : byte
@@ -530,7 +590,7 @@ internal readonly struct ProtocolMessage
 internal static class ProtocolCodec
 {
   internal const uint Magic = 0x43504C53; // "SLPC" in little-endian bytes.
-  internal const ushort CurrentVersion = 5;
+  internal const ushort CurrentVersion = 6;
   internal const int HeaderLength = 19;
   internal const int MaximumMessageSize = 64 * 1024;
 

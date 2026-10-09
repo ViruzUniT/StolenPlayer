@@ -22,6 +22,7 @@ internal static class ProtocolCodecTests
     RoundTripsPlayerPoseAndRoster();
     UdpPoseDatagramsRoundTripAndRejectMalformedPackets();
     RoundTripsSceneNamePayload();
+    DoorInteractionPayloadRoundTripsAndRejectsMalformedData();
     StableObjectIdentityTests.RunAll();
     TcpTransportConnectsAndFramesPackets();
     UdpPoseTransportExchangesDatagrams();
@@ -178,6 +179,29 @@ internal static class ProtocolCodecTests
     Assert(SceneNamePayload.TryDecode(payload, out var sceneName) && sceneName == "level1", "Host scene name did not round trip.");
     Assert(!SceneNamePayload.TryDecode(new byte[] { 3, (byte)'a', (byte)'/', (byte)'b' }, out _), "Scene path was accepted as a scene name.");
     Assert(!SceneNamePayload.TryDecode(new byte[] { 4, (byte)'a' }, out _), "Truncated scene name was accepted.");
+  }
+
+  private static void DoorInteractionPayloadRoundTripsAndRejectsMalformedData()
+  {
+    var key = Guid.NewGuid();
+    foreach (var action in new byte[] { 0, 1, 2 })
+    {
+      var payload = DoorInteractionPayload.Encode(key, "MainScene", action);
+      Assert(DoorInteractionPayload.TryDecode(payload, out var decoded), "Valid door interaction payload was rejected.");
+      Assert(decoded.Key == key && decoded.SceneName == "MainScene" && decoded.Action == action,
+        "Door interaction payload changed fields during round trip.");
+    }
+
+    var malformed = DoorInteractionPayload.Encode(key, "MainScene", 0);
+    malformed[16] = 3;
+    Assert(!DoorInteractionPayload.TryDecode(malformed, out _), "Unknown door interaction action was accepted.");
+    malformed = DoorInteractionPayload.Encode(key, "MainScene", 0);
+    malformed[17]++;
+    Assert(!DoorInteractionPayload.TryDecode(malformed, out _), "Mismatched door interaction length was accepted.");
+    malformed = DoorInteractionPayload.Encode(key, "MainScene", 0);
+    malformed[18] = (byte)'/';
+    Assert(!DoorInteractionPayload.TryDecode(malformed, out _), "Door interaction scene path was accepted.");
+    Assert(!DoorInteractionPayload.TryDecode(Array.Empty<byte>(), out _), "Empty door interaction payload was accepted.");
   }
 
   private static void UdpPoseDatagramsRoundTripAndRejectMalformedPackets()

@@ -73,6 +73,8 @@ internal sealed class MultiplayerSession : IDisposable
   internal event Action? SceneReadinessChanged;
   internal event Action<string>? HostSceneReceived;
   internal event Action<PlayerPoseData>? HostPoseReceived;
+  internal event Action<long, Guid, string>? DoorIntentReceived;
+  internal event Action<Guid, string, bool>? DoorStateReceived;
 
   internal MultiplayerSession(PluginConfig config, string gameVersion, string pluginVersion)
   {
@@ -114,6 +116,46 @@ internal sealed class MultiplayerSession : IDisposable
     if (_state != SessionState.Offline && _state != SessionState.Error) return;
     if (!HandshakePayload.TryNormalizePlayerName(playerName, out var normalizedName)) return;
     LocalPlayerName = normalizedName;
+  }
+
+  internal bool RequestDoorToggle(Guid key, string sceneName)
+  {
+    if (_disposed || _isHost || !_clientWorldReady || key == Guid.Empty
+        || string.IsNullOrWhiteSpace(sceneName) || _lastLocalPose == null
+        || !string.Equals(_lastLocalPose.Value.SceneName, sceneName, StringComparison.Ordinal)) return false;
+    foreach (var pair in _peers)
+    {
+      if (!pair.Value.Ready) continue;
+      Send(pair.Key, MessageKind.DoorIntent,
+        DoorInteractionPayload.Encode(key, sceneName, 0), DeliveryMode.Reliable);
+      return true;
+    }
+
+    return false;
+  }
+
+  internal void BroadcastDoorState(Guid key, string sceneName, bool isOpen)
+  {
+    if (_disposed || !_isHost || key == Guid.Empty || string.IsNullOrWhiteSpace(sceneName)) return;
+    var payload = DoorInteractionPayload.Encode(key, sceneName, isOpen ? (byte)2 : (byte)1);
+    var recipients = new List<long>();
+    foreach (var peer in _peers)
+      if (peer.Value.Ready && peer.Value.SceneReady) recipients.Add(peer.Key);
+    foreach (var connectionId in recipients)
+    {
+      if (_peers.TryGetValue(connectionId, out var peer) && peer.Ready && peer.SceneReady && peer.HasPose
+          && string.Equals(peer.LastPose.SceneName, sceneName, StringComparison.Ordinal))
+        Send(connectionId, MessageKind.DoorState, payload, DeliveryMode.Reliable);
+    }
+  }
+
+  internal bool TryGetPeerPose(long connectionId, out PlayerPoseData pose)
+  {
+    pose = default;
+    if (!_isHost || !_peers.TryGetValue(connectionId, out var peer) || !peer.Ready
+        || !peer.SceneReady || !peer.HasPose || Now - peer.LastPoseReceiveTime > 1.25) return false;
+    pose = peer.LastPose;
+    return true;
   }
   internal ulong HostPeerId
   {
@@ -495,6 +537,12 @@ internal sealed class MultiplayerSession : IDisposable
       case MessageKind.UdpPathReady:
         HandleUdpPathReady(peer.ConnectionId, state, message);
         break;
+      case MessageKind.DoorIntent:
+        HandleDoorIntent(peer.ConnectionId, state, message);
+        break;
+      case MessageKind.DoorState:
+        HandleDoorState(state, message);
+        break;
       case MessageKind.Disconnect:
         _transport?.Disconnect(peer.ConnectionId, "Peer closed the session.");
         break;
@@ -502,6 +550,38 @@ internal sealed class MultiplayerSession : IDisposable
         _transport?.Disconnect(peer.ConnectionId, "Unsupported protocol message.");
         break;
     }
+  }
+
+  private void HandleDoorIntent(long connectionId, PeerState state, ProtocolMessage message)
+  {
+    if (!_isHost || !state.Ready || !state.SceneReady || !state.HasPose
+        || Now - state.LastPoseReceiveTime > 1.25
+        || !DoorInteractionPayload.TryDecode(message.Payload, out var intent)
+        || intent.Action != 0 || _lastLocalPose == null
+        || !string.Equals(intent.SceneName, _lastLocalPose.Value.SceneName, StringComparison.Ordinal)
+        || !string.Equals(intent.SceneName, state.LastPose.SceneName, StringComparison.Ordinal))
+    {
+      Plugin.Log.LogWarning($"Rejected invalid or stale door intent from peer {state.RemotePeerId}.");
+      return;
+    }
+
+    DoorIntentReceived?.Invoke(connectionId, intent.Key, intent.SceneName);
+  }
+
+  private void HandleDoorState(PeerState state, ProtocolMessage message)
+  {
+    if (_isHost || !state.Ready || state.RemotePeerId != HostPeerId
+        || !DoorInteractionPayload.TryDecode(message.Payload, out var update)
+        || (update.Action != 1 && update.Action != 2)
+        || !string.Equals(update.SceneName, _expectedHostScene, StringComparison.Ordinal)
+        || _lastLocalPose == null
+        || !string.Equals(update.SceneName, _lastLocalPose.Value.SceneName, StringComparison.Ordinal))
+    {
+      Plugin.Log.LogWarning($"Rejected invalid door state from peer {state.RemotePeerId}.");
+      return;
+    }
+
+    DoorStateReceived?.Invoke(update.Key, update.SceneName, update.Action == 2);
   }
 
   private void HandleHello(long connectionId, PeerState state, ProtocolMessage message)

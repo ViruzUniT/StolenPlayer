@@ -35,7 +35,8 @@ internal sealed class MultiplayerRuntime : MonoBehaviour
     SceneManager.activeSceneChanged += OnActiveSceneChanged;
     _remotePlayers = gameObject.AddComponent<RemotePlayerManager>();
     _remotePlayers.Initialize(_session, config);
-    gameObject.AddComponent<StaticWorldIdentityScanner>();
+    var identities = gameObject.AddComponent<StaticWorldIdentityScanner>();
+    gameObject.AddComponent<DoorInteractionReplicator>().Initialize(_session, identities);
     _window = _initialWindow;
     _portInput = config.ListenPort.Value.ToString();
     _playerNameInput = config.PlayerName.Value;

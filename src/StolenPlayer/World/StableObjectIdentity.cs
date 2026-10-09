@@ -122,6 +122,18 @@ internal sealed class StableObjectRegistry<T> where T : class
     return false;
   }
 
+  internal bool TryGet(Guid value, out T? instance)
+  {
+    if (_registrations.TryGetValue(value, out var registration))
+    {
+      instance = registration.Instance;
+      return true;
+    }
+
+    instance = null;
+    return false;
+  }
+
   internal bool Remove(StableObjectKey key, T instance)
   {
     if (!_registrations.TryGetValue(key.Value, out var registration)

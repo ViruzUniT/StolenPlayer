@@ -45,6 +45,7 @@ internal sealed class StaticWorldIdentityScanner : MonoBehaviour
   }
 
   internal bool TryGetDoor(StableObjectKey key, out Door? door) => _registry.TryGet(key, out door);
+  internal bool TryGetDoor(Guid key, out Door? door) => _registry.TryGet(key, out door);
 
   private void OnSceneLoaded(Scene scene, LoadSceneMode mode) => ScanLoadedScenes();
   private void OnSceneUnloaded(Scene scene) => ScanLoadedScenes();

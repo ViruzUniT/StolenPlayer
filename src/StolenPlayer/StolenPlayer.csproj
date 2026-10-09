@@ -38,6 +38,11 @@
       <Private>false</Private>
     </Reference>
 
+    <Reference Include="UnityEngine.AudioModule">
+      <HintPath>$(TS2Path)\Thief Simulator 2_Data\Managed\UnityEngine.AudioModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
     <Reference Include="UnityEngine.IMGUIModule">
       <HintPath>$(TS2Path)\Thief Simulator 2_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
       <Private>false</Private>
