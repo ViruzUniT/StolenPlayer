@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -43,6 +44,8 @@ internal sealed class StaticWorldIdentityScanner : MonoBehaviour
     return false;
   }
 
+  internal bool TryGetDoor(StableObjectKey key, out Door? door) => _registry.TryGet(key, out door);
+
   private void OnSceneLoaded(Scene scene, LoadSceneMode mode) => ScanLoadedScenes();
   private void OnSceneUnloaded(Scene scene) => ScanLoadedScenes();
 
@@ -52,6 +55,7 @@ internal sealed class StaticWorldIdentityScanner : MonoBehaviour
     _registry = new StableObjectRegistry<Door>();
 
     var loadedSceneCount = 0;
+    var sceneDoorKeys = new Dictionary<string, SceneDoorKeys>(StringComparer.Ordinal);
     foreach (var door in Resources.FindObjectsOfTypeAll<Door>())
     {
       if (door == null || !door.gameObject.scene.IsValid() || !door.gameObject.scene.isLoaded)
@@ -76,6 +80,13 @@ internal sealed class StaticWorldIdentityScanner : MonoBehaviour
       }
 
       _doors.Add(new DoorIdentity(door, key));
+      if (!sceneDoorKeys.TryGetValue(sceneIdentity, out var sceneKeys))
+      {
+        sceneKeys = new SceneDoorKeys(scene.name, scene.path);
+        sceneDoorKeys.Add(sceneIdentity, sceneKeys);
+      }
+
+      sceneKeys.Keys.Add(key.ToString());
     }
 
     for (var i = 0; i < SceneManager.sceneCount; i++)
@@ -84,6 +95,16 @@ internal sealed class StaticWorldIdentityScanner : MonoBehaviour
     }
 
     Plugin.Log.LogInfo($"Static world identity scan covered {loadedSceneCount} loaded scene(s) and registered {_doors.Count} door(s); ambiguous identities were rejected.");
+    foreach (var scene in sceneDoorKeys.Values)
+    {
+      scene.Keys.Sort(StringComparer.Ordinal);
+      var canonicalKeys = string.Join("\n", scene.Keys.ToArray());
+      using (var sha256 = SHA256.Create())
+      {
+        var fingerprint = BitConverter.ToString(sha256.ComputeHash(Encoding.UTF8.GetBytes(canonicalKeys))).Replace("-", string.Empty);
+        Plugin.Log.LogInfo($"Static door identity fingerprint scene='{scene.Name}' path='{scene.Path}' count={scene.Keys.Count} sha256={fingerprint}.");
+      }
+    }
   }
 
   private static string GetBuildIdentity()
@@ -134,5 +155,18 @@ internal sealed class StaticWorldIdentityScanner : MonoBehaviour
 
     internal Door Door { get; }
     internal StableObjectKey Key { get; }
+  }
+
+  private sealed class SceneDoorKeys
+  {
+    internal SceneDoorKeys(string name, string path)
+    {
+      Name = name;
+      Path = path;
+    }
+
+    internal string Name { get; }
+    internal string Path { get; }
+    internal List<string> Keys { get; } = new List<string>();
   }
 }
