@@ -10,7 +10,11 @@ internal sealed class PluginConfig
     ConfigEntry<bool> verboseNetworking,
     ConfigEntry<string> idleAnimationNames,
     ConfigEntry<string> walkAnimationName,
-    ConfigEntry<string> runAnimationName)
+    ConfigEntry<string> runAnimationName,
+    ConfigEntry<string> playerName,
+    ConfigEntry<string> startupRole,
+    ConfigEntry<string> startupAddress,
+    ConfigEntry<int> startupPort)
   {
     ListenPort = listenPort;
     MaxPlayers = maxPlayers;
@@ -18,6 +22,10 @@ internal sealed class PluginConfig
     IdleAnimationNames = idleAnimationNames;
     WalkAnimationName = walkAnimationName;
     RunAnimationName = runAnimationName;
+    PlayerName = playerName;
+    StartupRole = startupRole;
+    StartupAddress = startupAddress;
+    StartupPort = startupPort;
   }
 
   internal ConfigEntry<int> ListenPort { get; }
@@ -31,6 +39,14 @@ internal sealed class PluginConfig
   internal ConfigEntry<string> WalkAnimationName { get; }
 
   internal ConfigEntry<string> RunAnimationName { get; }
+
+  internal ConfigEntry<string> PlayerName { get; }
+
+  internal ConfigEntry<string> StartupRole { get; }
+
+  internal ConfigEntry<string> StartupAddress { get; }
+
+  internal ConfigEntry<int> StartupPort { get; }
 
   internal static PluginConfig Bind(ConfigFile config)
   {
@@ -74,7 +90,33 @@ internal sealed class PluginConfig
       "Running",
       "Animation state used for a remote player who is running.");
 
+    var playerName = config.Bind(
+      "Player",
+      "Name",
+      "Player",
+      "Name shown to other players and saved in the local BepInEx config. Keep names unique within a session.");
+
+    var startupRole = config.Bind(
+      "LocalTest",
+      "StartupRole",
+      "None",
+      "Optional local harness startup role: None, Host, or Client. Leave as None for normal play.");
+
+    var startupAddress = config.Bind(
+      "LocalTest",
+      "StartupAddress",
+      "127.0.0.1",
+      "Host address used by a local harness client.");
+
+    var startupPort = config.Bind(
+      "LocalTest",
+      "StartupPort",
+      27960,
+      new ConfigDescription("Session TCP and UDP port used by the local harness.",
+        new AcceptableValueRange<int>(1024, 65535)));
+
     return new PluginConfig(listenPort, maxPlayers, verboseNetworking,
-      idleAnimationNames, walkAnimationName, runAnimationName);
+      idleAnimationNames, walkAnimationName, runAnimationName, playerName,
+      startupRole, startupAddress, startupPort);
   }
 }

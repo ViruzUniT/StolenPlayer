@@ -16,6 +16,7 @@ internal sealed class MultiplayerRuntime : MonoBehaviour
   private Rect _window;
   private string _address = "127.0.0.1";
   private string _portInput = string.Empty;
+  private string _playerNameInput = string.Empty;
   private bool _windowOpen = true;
   private GameObject? _visualPreview;
   private readonly PlayerStateReader _playerStateReader = new PlayerStateReader();
@@ -37,6 +38,31 @@ internal sealed class MultiplayerRuntime : MonoBehaviour
     gameObject.AddComponent<StaticWorldIdentityScanner>();
     _window = _initialWindow;
     _portInput = config.ListenPort.Value.ToString();
+    _playerNameInput = config.PlayerName.Value;
+  }
+
+  private void Start()
+  {
+    if (_config == null || _session == null)
+    {
+      return;
+    }
+
+    var role = _config.StartupRole.Value.Trim();
+    if (string.Equals(role, "Host", StringComparison.OrdinalIgnoreCase))
+    {
+      Plugin.Log.LogInfo($"Local test profile auto-starting host on port {_config.StartupPort.Value}.");
+      _session.Host(_config.StartupPort.Value);
+    }
+    else if (string.Equals(role, "Client", StringComparison.OrdinalIgnoreCase))
+    {
+      Plugin.Log.LogInfo($"Local test profile auto-joining {_config.StartupAddress.Value}:{_config.StartupPort.Value}.");
+      _session.Join(_config.StartupAddress.Value.Trim(), _config.StartupPort.Value);
+    }
+    else if (!string.Equals(role, "None", StringComparison.OrdinalIgnoreCase))
+    {
+      Plugin.Log.LogWarning($"Unknown LocalTest.StartupRole '{role}'; expected None, Host, or Client.");
+    }
   }
 
   private void Update()
@@ -124,6 +150,13 @@ internal sealed class MultiplayerRuntime : MonoBehaviour
   {
     GUILayout.BeginVertical();
     GUILayout.Label(_session?.Status ?? "Network session unavailable.");
+    GUILayout.BeginHorizontal();
+    GUILayout.Label("Player name", GUILayout.Width(85));
+    GUI.enabled = _session?.State == SessionState.Offline || _session?.State == SessionState.Error;
+    _playerNameInput = GUILayout.TextField(_playerNameInput, 24);
+    if (GUILayout.Button("Save", GUILayout.Width(52))) SavePlayerName();
+    GUI.enabled = true;
+    GUILayout.EndHorizontal();
     GUILayout.Space(8);
 
     var state = _session?.State ?? SessionState.Error;
@@ -142,7 +175,7 @@ internal sealed class MultiplayerRuntime : MonoBehaviour
       GUI.enabled = validPort;
       if (GUILayout.Button("Host direct IP session"))
       {
-        _session?.Host(port);
+        if (SavePlayerName()) _session?.Host(port);
       }
 
       GUILayout.BeginHorizontal();
@@ -151,7 +184,7 @@ internal sealed class MultiplayerRuntime : MonoBehaviour
       GUI.enabled = canJoin;
       if (GUILayout.Button("Join IP", GUILayout.Width(80)))
       {
-        _session?.Join(_address.Trim(), port);
+        if (SavePlayerName()) _session?.Join(_address.Trim(), port);
       }
 
       GUILayout.EndHorizontal();
@@ -167,6 +200,13 @@ internal sealed class MultiplayerRuntime : MonoBehaviour
       }
 
       GUILayout.Label($"Ready peers: {_session?.ReadyPeerCount ?? 0}");
+      if (_session != null)
+      {
+        foreach (var player in _session.CurrentRoster)
+        {
+          GUILayout.Label($"• {player.PlayerName}");
+        }
+      }
       if (GUILayout.Button("Leave session"))
       {
         _session?.Leave();
@@ -175,6 +215,26 @@ internal sealed class MultiplayerRuntime : MonoBehaviour
 
     GUILayout.EndVertical();
     GUI.DragWindow(new Rect(0, 0, 10000, 24));
+  }
+
+  private bool SavePlayerName()
+  {
+    if (_config == null || _session == null
+        || (_session.State != SessionState.Offline && _session.State != SessionState.Error))
+    {
+      return false;
+    }
+
+    if (!HandshakePayload.TryNormalizePlayerName(_playerNameInput, out var normalizedName))
+    {
+      Plugin.Log.LogWarning("Player name must contain 1–24 non-control characters.");
+      return false;
+    }
+
+    _playerNameInput = normalizedName;
+    _config.PlayerName.Value = normalizedName;
+    _session.UpdateLocalPlayerName(normalizedName);
+    return true;
   }
 
   private void DisposeSession()

@@ -68,7 +68,7 @@ internal sealed class MultiplayerSession : IDisposable
   private uint _lastHostUdpSequence;
   private double _lastHostUdpReceiveTime;
 
-  internal event Action<ulong[]>? RosterChanged;
+  internal event Action<PlayerIdentityData[]>? RosterChanged;
   internal event Action<ulong, PlayerPoseData>? PlayerPoseReceived;
   internal event Action? SceneReadinessChanged;
   internal event Action<string>? HostSceneReceived;
@@ -79,6 +79,13 @@ internal sealed class MultiplayerSession : IDisposable
     _config = config;
     _gameVersion = string.IsNullOrEmpty(gameVersion) ? "unknown" : gameVersion;
     _pluginVersion = pluginVersion;
+    if (!HandshakePayload.TryNormalizePlayerName(config.PlayerName.Value, out var playerName))
+    {
+      playerName = "Player";
+      Plugin.Log.LogWarning("Configured player name was invalid; using 'Player' for this session. Set a name in F8.");
+    }
+
+    LocalPlayerName = playerName;
     _localPeerId = CreatePeerId();
   }
 
@@ -86,6 +93,8 @@ internal sealed class MultiplayerSession : IDisposable
   internal string Status => _status;
   internal bool IsHost => _isHost;
   internal ulong LocalPeerId => _localPeerId;
+  internal string LocalPlayerName { get; private set; }
+  internal PlayerIdentityData[] CurrentRoster { get; private set; } = Array.Empty<PlayerIdentityData>();
   internal int ListenPort => _listenPort;
   internal string ExpectedHostScene => _expectedHostScene;
   internal bool IsClientSceneReady => _clientSceneReady;
@@ -98,6 +107,13 @@ internal sealed class MultiplayerSession : IDisposable
       ? _lastLocalPose.HasValue && string.Equals(_hostScene, sceneName, StringComparison.Ordinal)
           && string.Equals(_lastLocalPose.Value.SceneName, sceneName, StringComparison.Ordinal)
       : _clientWorldReady && _clientSceneReady && string.Equals(_expectedHostScene, sceneName, StringComparison.Ordinal);
+  }
+
+  internal void UpdateLocalPlayerName(string playerName)
+  {
+    if (_state != SessionState.Offline && _state != SessionState.Error) return;
+    if (!HandshakePayload.TryNormalizePlayerName(playerName, out var normalizedName)) return;
+    LocalPlayerName = normalizedName;
   }
   internal ulong HostPeerId
   {
@@ -390,7 +406,8 @@ internal sealed class MultiplayerSession : IDisposable
       SetState(SessionState.Handshaking, "Verifying host protocol and game version...");
     }
 
-    Send(peer.ConnectionId, MessageKind.Hello, HandshakePayload.EncodeHello(_gameVersion, _pluginVersion), DeliveryMode.Reliable);
+    Send(peer.ConnectionId, MessageKind.Hello,
+      HandshakePayload.EncodeHello(_gameVersion, _pluginVersion, LocalPlayerName), DeliveryMode.Reliable);
     if (_config.VerboseNetworking.Value)
     {
       Plugin.Log.LogDebug($"Started protocol handshake for TCP connection {peer.ConnectionId}.");
@@ -489,7 +506,8 @@ internal sealed class MultiplayerSession : IDisposable
 
   private void HandleHello(long connectionId, PeerState state, ProtocolMessage message)
   {
-    if (state.ReceivedHello || !HandshakePayload.TryDecodeHello(message.Payload, out var gameVersion, out var pluginVersion))
+    if (state.ReceivedHello || !HandshakePayload.TryDecodeHello(message.Payload,
+        out var gameVersion, out var pluginVersion, out var playerName))
     {
       _transport?.Disconnect(connectionId, "Malformed or duplicate protocol hello.");
       return;
@@ -504,14 +522,25 @@ internal sealed class MultiplayerSession : IDisposable
       return;
     }
 
+    if (_isHost && (string.Equals(playerName, LocalPlayerName, StringComparison.OrdinalIgnoreCase)
+        || HasPeerName(playerName, connectionId)))
+    {
+      Plugin.Log.LogWarning($"Rejected peer {state.RemotePeerId}: player name '{playerName}' is already in use.");
+      Send(connectionId, MessageKind.Welcome, WelcomePayload.EncodeRejected(), DeliveryMode.Reliable);
+      state.DisconnectAt = Now + RejectedPeerCloseDelaySeconds;
+      state.DisconnectReason = $"Player name '{playerName}' is already in use in this session.";
+      return;
+    }
+
     state.ReceivedHello = true;
+    state.RemotePlayerName = playerName;
     if (_isHost)
     {
       state.Ready = true;
       state.UdpToken = CreateSessionToken();
       state.SceneSyncDeadline = Now + SceneSynchronizationTimeoutSeconds;
       Send(connectionId, MessageKind.Welcome, WelcomePayload.EncodeAccepted(state.UdpToken), DeliveryMode.Reliable);
-      Plugin.Log.LogInfo($"TCP peer {state.RemotePeerId} passed the protocol handshake.");
+      Plugin.Log.LogInfo($"TCP peer {state.RemotePeerId} ({state.RemotePlayerName}) passed the protocol handshake.");
       if (!string.IsNullOrEmpty(_hostScene))
       {
         Send(connectionId, MessageKind.HostScene, SceneNamePayload.Encode(_hostScene), DeliveryMode.Reliable);
@@ -627,7 +656,7 @@ internal sealed class MultiplayerSession : IDisposable
 
   private void HandlePlayerRoster(long connectionId, PeerState state, ProtocolMessage message)
   {
-    if (_isHost || !state.Ready || !PlayerRosterPayload.TryDecode(message.Payload, out var peerIds))
+    if (_isHost || !state.Ready || !PlayerRosterPayload.TryDecode(message.Payload, out var players))
     {
       _transport?.Disconnect(connectionId, "Unexpected or malformed player roster.");
       return;
@@ -635,10 +664,11 @@ internal sealed class MultiplayerSession : IDisposable
 
     var containsLocal = false;
     var containsHost = false;
-    foreach (var peerId in peerIds)
+    foreach (var player in players)
     {
-      containsLocal |= peerId == _localPeerId;
-      containsHost |= peerId == state.RemotePeerId;
+      containsLocal |= player.PeerId == _localPeerId && string.Equals(player.PlayerName, LocalPlayerName, StringComparison.Ordinal);
+      containsHost |= player.PeerId == state.RemotePeerId
+        && string.Equals(player.PlayerName, state.RemotePlayerName, StringComparison.Ordinal);
     }
 
     if (!containsLocal || !containsHost)
@@ -648,16 +678,17 @@ internal sealed class MultiplayerSession : IDisposable
     }
 
     _knownPeerIds.Clear();
-    foreach (var peerId in peerIds)
+    foreach (var player in players)
     {
-      _knownPeerIds.Add(peerId);
+      _knownPeerIds.Add(player.PeerId);
     }
 
     RemovePendingWorldPosesOutsideRoster();
 
     _clientRosterReceived = true;
+    CurrentRoster = players;
     SetState(SessionState.Connected, "Host scene loaded. Applying host spawn position and player roster.");
-    RosterChanged?.Invoke(peerIds);
+    RosterChanged?.Invoke(players);
   }
 
   private void HandleHostScene(long connectionId, PeerState state, ProtocolMessage message)
@@ -675,7 +706,8 @@ internal sealed class MultiplayerSession : IDisposable
     _clientRosterReceived = false;
     _pendingWorldPoses.Clear();
     _knownPeerIds.Clear();
-    RosterChanged?.Invoke(Array.Empty<ulong>());
+    CurrentRoster = Array.Empty<PlayerIdentityData>();
+    RosterChanged?.Invoke(CurrentRoster);
     SetState(SessionState.Connected, $"Host scene: {sceneName}. Loading host game scene...");
     Plugin.Log.LogInfo($"Host selected scene '{sceneName}'; waiting for the client scene load.");
     HostSceneReceived?.Invoke(sceneName);
@@ -1071,21 +1103,22 @@ internal sealed class MultiplayerSession : IDisposable
   private void RefreshRosterAndSnapshots()
   {
     var revision = _rosterRevision;
-    var peerIds = new List<ulong> { _localPeerId };
+    var players = new List<PlayerIdentityData> { new PlayerIdentityData(_localPeerId, LocalPlayerName) };
     foreach (var peer in _peers.Values)
     {
       if (peer.Ready && peer.SceneReady)
       {
-        peerIds.Add(peer.RemotePeerId);
+        players.Add(new PlayerIdentityData(peer.RemotePeerId, peer.RemotePlayerName));
       }
     }
 
-    var roster = peerIds.ToArray();
+    var roster = players.ToArray();
+    CurrentRoster = roster;
     _knownPeerIds.Clear();
     _pendingWorldPoses.Clear();
-    foreach (var peerId in roster)
+    foreach (var player in roster)
     {
-      _knownPeerIds.Add(peerId);
+      _knownPeerIds.Add(player.PeerId);
     }
 
     RosterChanged?.Invoke(roster);
@@ -1148,8 +1181,8 @@ internal sealed class MultiplayerSession : IDisposable
     _clientSceneSyncDeadline = Now + SceneSynchronizationTimeoutSeconds;
     _clientRosterReceived = false;
     _nextHeartbeat = Now + HeartbeatIntervalSeconds;
-    SetState(SessionState.Connected, $"Connected to host peer {state.RemotePeerId}. Waiting for world synchronization.");
-    Plugin.Log.LogInfo($"Direct IP protocol handshake completed with peer {state.RemotePeerId}.");
+    SetState(SessionState.Connected, $"Connected to host {state.RemotePlayerName}. Waiting for world synchronization.");
+    Plugin.Log.LogInfo($"Direct IP protocol handshake completed with host {state.RemotePlayerName} ({state.RemotePeerId}).");
   }
 
   private bool HasPeerIdentity(ulong peerId, long exceptConnection)
@@ -1163,6 +1196,17 @@ internal sealed class MultiplayerSession : IDisposable
     }
 
     return peerId == _localPeerId;
+  }
+
+  private bool HasPeerName(string playerName, long exceptConnection)
+  {
+    foreach (var pair in _peers)
+    {
+      if (pair.Key != exceptConnection && pair.Value.RemotePeerId != 0
+          && string.Equals(pair.Value.RemotePlayerName, playerName, StringComparison.OrdinalIgnoreCase)) return true;
+    }
+
+    return false;
   }
 
   private void OnPeerDisconnected(TransportPeer peer, string reason)
@@ -1246,7 +1290,8 @@ internal sealed class MultiplayerSession : IDisposable
     _lastHostUdpSequence = 0;
     _lastHostUdpReceiveTime = 0;
     _localPeerId = CreatePeerId();
-    RosterChanged?.Invoke(Array.Empty<ulong>());
+    CurrentRoster = Array.Empty<PlayerIdentityData>();
+    RosterChanged?.Invoke(CurrentRoster);
     SceneReadinessChanged?.Invoke();
     SetState(SessionState.Offline, reason);
   }
@@ -1289,6 +1334,7 @@ internal sealed class MultiplayerSession : IDisposable
     }
 
     internal ulong RemotePeerId;
+    internal string RemotePlayerName = string.Empty;
     internal bool ReceivedHello;
     internal bool Ready;
     internal bool SceneReady;

@@ -351,59 +351,98 @@ internal static class PlayerPosePayload
 internal static class PlayerRosterPayload
 {
   private const int MaximumPeerCount = 4;
+  private const int MaximumNameBytes = 48;
 
-  internal static byte[] Encode(IReadOnlyList<ulong> peerIds)
+  internal static byte[] Encode(IReadOnlyList<PlayerIdentityData> players)
   {
-    if (peerIds == null || peerIds.Count == 0 || peerIds.Count > MaximumPeerCount)
+    if (players == null || players.Count == 0 || players.Count > MaximumPeerCount)
     {
-      throw new ArgumentOutOfRangeException(nameof(peerIds));
+      throw new ArgumentOutOfRangeException(nameof(players));
     }
 
-    var payload = new byte[sizeof(byte) + sizeof(ulong) * peerIds.Count];
-    payload[0] = (byte)peerIds.Count;
-    var unique = new HashSet<ulong>();
-    for (var index = 0; index < peerIds.Count; index++)
+    var encodedNames = new byte[players.Count][];
+    var payloadLength = sizeof(byte);
+    for (var index = 0; index < players.Count; index++)
     {
-      var id = peerIds[index];
-      if (id == 0 || !unique.Add(id))
+      if (!HandshakePayload.TryNormalizePlayerName(players[index].PlayerName, out var name))
+        throw new ArgumentException("Roster player name is invalid.", nameof(players));
+      encodedNames[index] = Encoding.UTF8.GetBytes(name);
+      payloadLength += sizeof(ulong) + sizeof(byte) + encodedNames[index].Length;
+    }
+
+    var payload = new byte[payloadLength];
+    payload[0] = (byte)players.Count;
+    var unique = new HashSet<ulong>();
+    var uniqueNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    var offset = sizeof(byte);
+    for (var index = 0; index < players.Count; index++)
+    {
+      var player = players[index];
+      if (player.PeerId == 0 || !unique.Add(player.PeerId) || !uniqueNames.Add(player.PlayerName.Trim()))
       {
-        throw new ArgumentException("Roster peer IDs must be nonzero and unique.", nameof(peerIds));
+        throw new ArgumentException("Roster peer IDs and names must be nonzero and unique.", nameof(players));
       }
 
-      WriteUInt64(payload, sizeof(byte) + sizeof(ulong) * index, id);
+      WriteUInt64(payload, offset, player.PeerId);
+      offset += sizeof(ulong);
+      payload[offset++] = (byte)encodedNames[index].Length;
+      Array.Copy(encodedNames[index], 0, payload, offset, encodedNames[index].Length);
+      offset += encodedNames[index].Length;
     }
 
     return payload;
   }
 
-  internal static bool TryDecode(byte[] payload, out ulong[] peerIds)
+  internal static bool TryDecode(byte[] payload, out PlayerIdentityData[] players)
   {
-    peerIds = Array.Empty<ulong>();
+    players = Array.Empty<PlayerIdentityData>();
     if (payload == null || payload.Length < sizeof(byte))
     {
       return false;
     }
 
     var count = payload[0];
-    if (count == 0 || count > MaximumPeerCount || payload.Length != sizeof(byte) + sizeof(ulong) * count)
+    if (count == 0 || count > MaximumPeerCount)
     {
       return false;
     }
 
-    var ids = new ulong[count];
+    var entries = new PlayerIdentityData[count];
     var unique = new HashSet<ulong>();
+    var uniqueNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    var offset = sizeof(byte);
     for (var index = 0; index < count; index++)
     {
-      var id = ReadUInt64(payload, sizeof(byte) + sizeof(ulong) * index);
-      if (id == 0 || !unique.Add(id))
+      if (payload.Length - offset < sizeof(ulong) + sizeof(byte)) return false;
+      var id = ReadUInt64(payload, offset);
+      offset += sizeof(ulong);
+      var nameLength = payload[offset++];
+      if (id == 0 || !unique.Add(id) || nameLength == 0 || nameLength > MaximumNameBytes
+          || payload.Length - offset < nameLength)
       {
         return false;
       }
 
-      ids[index] = id;
+      string name;
+      try
+      {
+        name = new UTF8Encoding(false, true).GetString(payload, offset, nameLength);
+      }
+      catch (DecoderFallbackException)
+      {
+        return false;
+      }
+
+      if (!HandshakePayload.TryNormalizePlayerName(name, out var normalizedName)
+          || !string.Equals(name, normalizedName, StringComparison.Ordinal)
+          || !uniqueNames.Add(normalizedName)) return false;
+
+      entries[index] = new PlayerIdentityData(id, normalizedName);
+      offset += nameLength;
     }
 
-    peerIds = ids;
+    if (offset != payload.Length) return false;
+    players = entries;
     return true;
   }
 
@@ -427,6 +466,18 @@ internal static class PlayerRosterPayload
   }
 }
 
+internal readonly struct PlayerIdentityData
+{
+  internal PlayerIdentityData(ulong peerId, string playerName)
+  {
+    PeerId = peerId;
+    PlayerName = playerName;
+  }
+
+  internal ulong PeerId { get; }
+  internal string PlayerName { get; }
+}
+
 internal readonly struct ProtocolMessage
 {
   internal ProtocolMessage(ushort version, MessageKind kind, ulong senderPeerId, uint sequence, byte[] payload)
@@ -448,7 +499,7 @@ internal readonly struct ProtocolMessage
 internal static class ProtocolCodec
 {
   internal const uint Magic = 0x43504C53; // "SLPC" in little-endian bytes.
-  internal const ushort CurrentVersion = 4;
+  internal const ushort CurrentVersion = 5;
   internal const int HeaderLength = 19;
   internal const int MaximumMessageSize = 64 * 1024;
 
@@ -570,11 +621,12 @@ internal static class ProtocolCodec
 
 internal static class HandshakePayload
 {
-  private const int FixedLength = sizeof(ushort) * 2;
+  private const int FixedLength = sizeof(ushort) * 3;
   private const int MaximumVersionBytes = 64;
+  private const int MaximumNameBytes = 48;
   private static readonly UTF8Encoding StrictUtf8 = new UTF8Encoding(false, true);
 
-  internal static byte[] EncodeHello(string gameVersion, string pluginVersion)
+  internal static byte[] EncodeHello(string gameVersion, string pluginVersion, string playerName)
   {
     if (string.IsNullOrEmpty(gameVersion) || string.IsNullOrEmpty(pluginVersion))
     {
@@ -583,23 +635,29 @@ internal static class HandshakePayload
 
     var gameVersionBytes = Encoding.UTF8.GetBytes(gameVersion);
     var pluginVersionBytes = Encoding.UTF8.GetBytes(pluginVersion);
+    if (!TryNormalizePlayerName(playerName, out var normalizedPlayerName))
+      throw new ArgumentException("Player name must contain 1–24 non-control characters.", nameof(playerName));
+    var playerNameBytes = Encoding.UTF8.GetBytes(normalizedPlayerName);
     if (gameVersionBytes.Length > MaximumVersionBytes || pluginVersionBytes.Length > MaximumVersionBytes)
     {
       throw new ArgumentOutOfRangeException(nameof(gameVersion), "Version string is too long for the handshake.");
     }
 
-    var payload = new byte[FixedLength + gameVersionBytes.Length + pluginVersionBytes.Length];
+    var payload = new byte[FixedLength + gameVersionBytes.Length + pluginVersionBytes.Length + playerNameBytes.Length];
     WriteUInt16(payload, 0, (ushort)gameVersionBytes.Length);
     WriteUInt16(payload, sizeof(ushort), (ushort)pluginVersionBytes.Length);
+    WriteUInt16(payload, sizeof(ushort) * 2, (ushort)playerNameBytes.Length);
     Array.Copy(gameVersionBytes, 0, payload, FixedLength, gameVersionBytes.Length);
     Array.Copy(pluginVersionBytes, 0, payload, FixedLength + gameVersionBytes.Length, pluginVersionBytes.Length);
+    Array.Copy(playerNameBytes, 0, payload, FixedLength + gameVersionBytes.Length + pluginVersionBytes.Length, playerNameBytes.Length);
     return payload;
   }
 
-  internal static bool TryDecodeHello(byte[] payload, out string gameVersion, out string pluginVersion)
+  internal static bool TryDecodeHello(byte[] payload, out string gameVersion, out string pluginVersion, out string playerName)
   {
     gameVersion = string.Empty;
     pluginVersion = string.Empty;
+    playerName = string.Empty;
     if (payload == null || payload.Length < FixedLength)
     {
       return false;
@@ -607,9 +665,11 @@ internal static class HandshakePayload
 
     var gameVersionLength = ReadUInt16(payload, 0);
     var pluginVersionLength = ReadUInt16(payload, sizeof(ushort));
+    var playerNameLength = ReadUInt16(payload, sizeof(ushort) * 2);
     if (gameVersionLength == 0 || gameVersionLength > MaximumVersionBytes
         || pluginVersionLength == 0 || pluginVersionLength > MaximumVersionBytes
-        || payload.Length != FixedLength + gameVersionLength + pluginVersionLength)
+        || playerNameLength == 0 || playerNameLength > MaximumNameBytes
+        || payload.Length != FixedLength + gameVersionLength + pluginVersionLength + playerNameLength)
     {
       return false;
     }
@@ -618,9 +678,31 @@ internal static class HandshakePayload
     {
       gameVersion = StrictUtf8.GetString(payload, FixedLength, gameVersionLength);
       pluginVersion = StrictUtf8.GetString(payload, FixedLength + gameVersionLength, pluginVersionLength);
-      return gameVersion.Length > 0 && pluginVersion.Length > 0;
+      playerName = StrictUtf8.GetString(payload, FixedLength + gameVersionLength + pluginVersionLength, playerNameLength);
+      return gameVersion.Length > 0 && pluginVersion.Length > 0
+        && TryNormalizePlayerName(playerName, out var normalizedName)
+        && string.Equals(playerName, normalizedName, StringComparison.Ordinal);
     }
     catch (DecoderFallbackException)
+    {
+      return false;
+    }
+  }
+
+  internal static bool TryNormalizePlayerName(string? playerName, out string normalizedName)
+  {
+    normalizedName = (playerName ?? string.Empty).Trim();
+    if (normalizedName.Length == 0 || normalizedName.Length > 24) return false;
+    foreach (var character in normalizedName)
+    {
+      if (char.IsControl(character)) return false;
+    }
+
+    try
+    {
+      return StrictUtf8.GetByteCount(normalizedName) <= MaximumNameBytes;
+    }
+    catch (EncoderFallbackException)
     {
       return false;
     }

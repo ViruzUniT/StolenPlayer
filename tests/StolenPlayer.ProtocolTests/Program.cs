@@ -109,29 +109,31 @@ internal static class ProtocolCodecTests
   {
     const string gameVersion = "1.2.3-beta";
     const string pluginVersion = "0.3.0";
-    var payload = HandshakePayload.EncodeHello(gameVersion, pluginVersion);
-    Assert(HandshakePayload.TryDecodeHello(payload, out var decodedVersion, out var decodedPluginVersion), "Valid handshake payload was rejected.");
+    const string playerName = "Stealing Astronaut";
+    var payload = HandshakePayload.EncodeHello(gameVersion, pluginVersion, playerName);
+    Assert(HandshakePayload.TryDecodeHello(payload, out var decodedVersion, out var decodedPluginVersion, out var decodedPlayerName), "Valid handshake payload was rejected.");
     Assert(decodedVersion == gameVersion, "Handshake game version changed during round trip.");
     Assert(decodedPluginVersion == pluginVersion, "Handshake plugin version changed during round trip.");
+    Assert(decodedPlayerName == playerName, "Handshake player name changed during round trip.");
   }
 
   private static void RejectsMalformedHandshakePayloads()
   {
-    Assert(!HandshakePayload.TryDecodeHello(null!, out _, out _), "Null handshake payload was accepted.");
-    Assert(!HandshakePayload.TryDecodeHello(new byte[4], out _, out _), "Empty handshake versions were accepted.");
+    Assert(!HandshakePayload.TryDecodeHello(null!, out _, out _, out _), "Null handshake payload was accepted.");
+    Assert(!HandshakePayload.TryDecodeHello(new byte[6], out _, out _, out _), "Empty handshake versions were accepted.");
 
-    var valid = HandshakePayload.EncodeHello("1.0", "0.3.0");
+    var valid = HandshakePayload.EncodeHello("1.0", "0.8.0", "Player");
     var truncated = valid[..^1];
-    Assert(!HandshakePayload.TryDecodeHello(truncated, out _, out _), "Truncated handshake payload was accepted.");
+    Assert(!HandshakePayload.TryDecodeHello(truncated, out _, out _, out _), "Truncated handshake payload was accepted.");
 
-    var invalidUtf8 = HandshakePayload.EncodeHello("1.0", "0.3.0");
+    var invalidUtf8 = HandshakePayload.EncodeHello("1.0", "0.8.0", "Player");
     invalidUtf8[^1] = 0xFF;
-    Assert(!HandshakePayload.TryDecodeHello(invalidUtf8, out _, out _), "Invalid UTF-8 handshake version was accepted.");
+    Assert(!HandshakePayload.TryDecodeHello(invalidUtf8, out _, out _, out _), "Invalid UTF-8 handshake name was accepted.");
 
-    var invalidLength = HandshakePayload.EncodeHello("1.0", "0.3.0");
+    var invalidLength = HandshakePayload.EncodeHello("1.0", "0.8.0", "Player");
     invalidLength[0] = 0xFF;
     invalidLength[1] = 0xFF;
-    Assert(!HandshakePayload.TryDecodeHello(invalidLength, out _, out _), "Invalid handshake string length was accepted.");
+    Assert(!HandshakePayload.TryDecodeHello(invalidLength, out _, out _, out _), "Invalid handshake string length was accepted.");
   }
 
   private static void RoundTripsPlayerPoseAndRoster()
@@ -147,11 +149,23 @@ internal static class ProtocolCodecTests
     Assert(PlayerPosePayload.TryDecodeWorldPose(worldEncoded, out var peerId, out decoded), "Valid world pose was rejected.");
     Assert(peerId == 1234 && decoded.SceneName == pose.SceneName, "World pose identity or scene changed during round trip.");
 
-    var roster = new ulong[] { 1234, 5678, 9012 };
+    var roster = new[]
+    {
+      new PlayerIdentityData(1234, "Host"),
+      new PlayerIdentityData(5678, "Player Two"),
+      new PlayerIdentityData(9012, "Player Three")
+    };
     var rosterBytes = PlayerRosterPayload.Encode(roster);
     Assert(PlayerRosterPayload.TryDecode(rosterBytes, out var decodedRoster), "Valid player roster was rejected.");
-    Assert(decodedRoster.SequenceEqual(roster), "Player roster changed during round trip.");
-    Assert(!PlayerRosterPayload.TryDecode(new byte[] { 2, 1, 0, 0, 0, 0, 0, 0, 0, 1 }, out _), "Roster with duplicate identities was accepted.");
+    Assert(decodedRoster.Length == roster.Length
+      && decodedRoster.Zip(roster, (actual, expected) => actual.PeerId == expected.PeerId && actual.PlayerName == expected.PlayerName).All(equal => equal),
+      "Player roster changed during round trip.");
+    var duplicateRoster = PlayerRosterPayload.Encode(new[] { new PlayerIdentityData(1, "A"), new PlayerIdentityData(2, "B") });
+    Array.Copy(duplicateRoster, 1, duplicateRoster, 11, sizeof(ulong));
+    Assert(!PlayerRosterPayload.TryDecode(duplicateRoster, out _), "Roster with duplicate identities was accepted.");
+    var duplicateNames = PlayerRosterPayload.Encode(new[] { new PlayerIdentityData(1, "A"), new PlayerIdentityData(2, "B") });
+    duplicateNames[20] = duplicateNames[10];
+    Assert(!PlayerRosterPayload.TryDecode(duplicateNames, out _), "Roster with duplicate names was accepted.");
 
     var invalidFlags = (byte[])encoded.Clone();
     invalidFlags[sizeof(float) * 4] = 0x80;

@@ -21,9 +21,10 @@ The build/test checks do not substitute for these in-game checks. If the menu pa
 3. Start the client instance, enter `127.0.0.1` and port `27960`, then select **Join IP**.
 4. Confirm the host shows one ready peer and the client loads the host's current scene and spawn position.
 5. Confirm both players can see the other move; check that walking/running animations follow movement and the idle pose remains upright.
-6. In each BepInEx log, compare the `Static world identity scan` counts for the same loaded scenes. The scanner identity now includes serialized sibling and same-object component ordinals to distinguish repeated names. Investigate any remaining `Door identity rejected` messages; object keys are diagnostic only and do not yet drive gameplay replication.
-7. Confirm the host logs `UDP movement listener opened` and both sides log `UDP movement path established/confirmed`. Move on both sides and verify poses stay responsive. Test with UDP blocked locally or by firewall and confirm TCP pose fallback is logged and movement still works. For internet play, forward/allow the session port for both TCP and UDP.
-7. Leave from either side and confirm the other side detects the disconnect and removes its avatar.
+6. Set distinct names in both F8 panels, save them, and reconnect. Confirm each side's roster shows the expected names and each BepInEx config retains its own value after restart. Try joining with the same name as the host and confirm the host rejects the duplicate without losing its session.
+7. In each BepInEx log, compare the `Static world identity scan` counts for the same loaded scenes. The scanner identity now includes serialized sibling and same-object component ordinals to distinguish repeated names. Investigate any remaining `Door identity rejected` messages; object keys are diagnostic only and do not yet drive gameplay replication.
+8. Confirm the host logs `UDP movement listener opened` and both sides log `UDP movement path established/confirmed`. Move on both sides and verify poses stay responsive. Test with UDP blocked locally or by firewall and confirm TCP pose fallback is logged and movement still works. For internet play, forward/allow the session port for both TCP and UDP.
+9. Leave from either side and confirm the other side detects the disconnect and removes its avatar.
 
 ## Local network
 

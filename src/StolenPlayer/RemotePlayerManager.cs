@@ -17,6 +17,7 @@ internal sealed class RemotePlayerManager : MonoBehaviour
   private readonly Dictionary<ulong, PlayerPoseData> _latestPoses = new Dictionary<ulong, PlayerPoseData>();
   private readonly Dictionary<ulong, int> _failedSpawnSceneHandles = new Dictionary<ulong, int>();
   private readonly HashSet<ulong> _roster = new HashSet<ulong>();
+  private readonly Dictionary<ulong, string> _playerNames = new Dictionary<ulong, string>();
   private MultiplayerSession? _session;
   private PluginConfig? _config;
   private int _sceneHandle = -1;
@@ -47,13 +48,18 @@ internal sealed class RemotePlayerManager : MonoBehaviour
     DestroyAllRepresentations("ManagerDestroyed");
   }
 
-  private void OnRosterChanged(ulong[] peerIds)
+  private void OnRosterChanged(PlayerIdentityData[] players)
   {
     _roster.Clear();
+    _playerNames.Clear();
     _failedSpawnSceneHandles.Clear();
-    foreach (var peerId in peerIds)
+    foreach (var player in players)
     {
-      if (peerId != 0 && peerId != _session?.LocalPeerId) _roster.Add(peerId);
+      if (player.PeerId != 0 && player.PeerId != _session?.LocalPeerId)
+      {
+        _roster.Add(player.PeerId);
+        _playerNames[player.PeerId] = player.PlayerName;
+      }
     }
 
     var stalePoses = new List<ulong>();
@@ -168,8 +174,9 @@ internal sealed class RemotePlayerManager : MonoBehaviour
         continue;
       }
 
+      var displayName = _playerNames.TryGetValue(peerId, out var knownName) ? knownName : $"Player {peerId}";
       if (!RemotePlayerVisualPreview.TryCreateAt(new Vector3(pose.X, pose.Y, pose.Z), pose.Yaw,
-          $"StolenPlayer Remote Player {peerId}", _config, out var root, out var error))
+          $"{displayName} ({peerId})", _config, out var root, out var error))
       {
         _failedSpawnSceneHandles[peerId] = scene.handle;
         Plugin.Log.LogWarning($"RemotePlayerLifecycle peer={peerId} action=SpawnFailed scene={scene.name} reason={error}");
@@ -188,7 +195,7 @@ internal sealed class RemotePlayerManager : MonoBehaviour
       _avatars[peerId] = avatar;
       _failedSpawnSceneHandles.Remove(peerId);
       avatar.SetPose(pose);
-      Plugin.Log.LogInfo($"RemotePlayerLifecycle peer={peerId} action=Spawn reason=Reconcile scene={scene.name} sceneHandle={scene.handle}");
+      Plugin.Log.LogInfo($"RemotePlayerLifecycle peer={peerId} name='{displayName}' action=Spawn reason=Reconcile scene={scene.name} sceneHandle={scene.handle}");
     }
   }
 

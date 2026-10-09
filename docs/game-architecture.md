@@ -23,6 +23,8 @@ Relevant methods include `PlayerScript.AddItem(Int32)`, `RemoveItem(Int32)`, `In
 
 `GameManager.SaveToProfile(Int32)` stages a selected profile through `InitializePrefs.SaveExtra`, invokes `PlayerScript.Quicksave`, and restores the saved data. `GameManager.LoadProfile(Int32)` selects a `saveData*.thief` file, copies it to the active `saveData.thief`, and loads a checkpoint. The base game therefore combines many world and player values in a profile-oriented save flow.
 
+Unity's `Application.persistentDataPath` is the root for TS2 save files. The StolenPlayer F8 name is stored in BepInEx configuration and identifies a session participant for display; it does not change Unity's persistent data path or isolate the base game's `saveData*.thief` files. Do not treat a chosen name as a verified account identity for persistent inventory.
+
 `PlayerScript.AddItem` and `RemoveItem` mutate `ItemID.item_amount` and player carry weight. `ItemID.Save_Item_Amount()` writes inventory, storage, and locker counts under keys derived from the item ID (`Item_`, `Storage_Item_`, and `Locker_Item_`). `Pickupable` includes `prefName` and `generatedHash` candidates, but neither has been proven to be a unique, cross-session network identity.
 
 `UpgradeIt.BuyUpgrade()` debits `PlayerScript.moneyAm`, increments `UpgradeItem.currentUpgrade`, and writes preference keys based on `UpgradeItem.upgradePref`. This shows progression and money share the base profile flow; it does not establish whether co-op money should be shared or player-specific. That policy remains open pending gameplay review.
