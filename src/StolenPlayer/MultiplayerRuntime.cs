@@ -37,6 +37,8 @@ internal sealed class MultiplayerRuntime : MonoBehaviour
     _remotePlayers.Initialize(_session, config);
     var identities = gameObject.AddComponent<StaticWorldIdentityScanner>();
     gameObject.AddComponent<DoorInteractionReplicator>().Initialize(_session, identities);
+    SceneManager.sceneLoaded += OnSceneLoaded;
+    SceneManager.sceneUnloaded += OnSceneUnloaded;
     _window = _initialWindow;
     _portInput = config.ListenPort.Value.ToString();
     _playerNameInput = config.PlayerName.Value;
@@ -242,6 +244,8 @@ internal sealed class MultiplayerRuntime : MonoBehaviour
   private void DisposeSession()
   {
     SceneManager.activeSceneChanged -= OnActiveSceneChanged;
+    SceneManager.sceneLoaded -= OnSceneLoaded;
+    SceneManager.sceneUnloaded -= OnSceneUnloaded;
     if (_session != null)
     {
       _session.HostSceneReceived -= OnHostSceneReceived;
@@ -257,11 +261,14 @@ internal sealed class MultiplayerRuntime : MonoBehaviour
     _session?.NotifyLocalSceneChanged();
   }
 
-  private void OnHostSceneReceived(string sceneName)
+  private void OnSceneLoaded(Scene scene, LoadSceneMode mode) => _session?.NotifyLocalSceneChanged();
+  private void OnSceneUnloaded(Scene scene) => _session?.NotifyLocalSceneChanged();
+
+  private void OnHostSceneReceived(HostSceneData sceneData)
   {
     _requiresHostSpawn = true;
     _pendingHostSpawnPose = null;
-    Plugin.Log.LogInfo($"Loading host scene '{sceneName}' on this client.");
+    Plugin.Log.LogInfo($"Loading host scene set: active='{sceneData.ActiveScene}', loaded={string.Join(", ", sceneData.LoadedScenes)}.");
   }
 
   private void OnHostPoseReceived(PlayerPoseData pose)
@@ -306,40 +313,83 @@ internal sealed class MultiplayerRuntime : MonoBehaviour
 
     var expectedScene = _session.ExpectedHostScene;
     var activeScene = SceneManager.GetActiveScene();
-    if (activeScene.IsValid() && activeScene.isLoaded && string.Equals(activeScene.name, expectedScene, StringComparison.Ordinal))
-    {
-      _sceneLoadOperation = null;
-      _session.MarkClientSceneReady(expectedScene);
-      return;
-    }
-
     if (_sceneLoadOperation != null && !_sceneLoadOperation.isDone)
     {
       return;
     }
+    _sceneLoadOperation = null;
 
-#pragma warning disable CS0618
-    if (!Application.CanStreamedLevelBeLoaded(expectedScene))
+    if (!activeScene.IsValid() || !activeScene.isLoaded || !string.Equals(activeScene.name, expectedScene, StringComparison.Ordinal))
     {
-      _session.FailSceneSynchronization($"'{expectedScene}' is not present in this game's build settings.");
+      LoadClientScene(expectedScene, LoadSceneMode.Single);
+      return;
+    }
+
+    if (!ReconcileClientLoadedScenes(_session.ExpectedHostScenes)) return;
+    _session.MarkClientSceneReady(expectedScene);
+  }
+
+  private void LoadClientScene(string sceneName, LoadSceneMode mode)
+  {
+#pragma warning disable CS0618
+    if (!Application.CanStreamedLevelBeLoaded(sceneName))
+    {
+      _session?.FailSceneSynchronization($"'{sceneName}' is not present in this game's build settings.");
       return;
     }
 #pragma warning restore CS0618
 
     try
     {
-      _sceneLoadOperation = SceneManager.LoadSceneAsync(expectedScene, LoadSceneMode.Single);
+      _sceneLoadOperation = SceneManager.LoadSceneAsync(sceneName, mode);
       if (_sceneLoadOperation == null)
       {
-        _session.FailSceneSynchronization($"Unity did not start loading '{expectedScene}'.");
+        _session?.FailSceneSynchronization($"Unity did not start loading '{sceneName}' ({mode}).");
         return;
       }
 
-      Plugin.Log.LogInfo($"Client scene load started for host scene '{expectedScene}'.");
+      Plugin.Log.LogInfo($"Client scene load started for '{sceneName}' ({mode}).");
     }
     catch (Exception exception)
     {
-      _session.FailSceneSynchronization(exception.Message);
+      _session?.FailSceneSynchronization(exception.Message);
     }
+  }
+
+  private bool ReconcileClientLoadedScenes(string[] expectedScenes)
+  {
+    var expected = new System.Collections.Generic.HashSet<string>(expectedScenes, StringComparer.Ordinal);
+    var loaded = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+    var activeName = SceneManager.GetActiveScene().name;
+
+    for (var index = 0; index < SceneManager.sceneCount; index++)
+    {
+      var scene = SceneManager.GetSceneAt(index);
+      if (!scene.IsValid() || !scene.isLoaded || string.IsNullOrWhiteSpace(scene.path)) continue;
+      if (!loaded.Add(scene.name))
+      {
+        if (!string.Equals(scene.name, activeName, StringComparison.Ordinal))
+        {
+          Plugin.Log.LogWarning($"Unloading duplicate additive scene '{scene.name}' before multiplayer synchronization.");
+          _sceneLoadOperation = SceneManager.UnloadSceneAsync(scene);
+          return false;
+        }
+      }
+      else if (!expected.Contains(scene.name) && !string.Equals(scene.name, activeName, StringComparison.Ordinal))
+      {
+        Plugin.Log.LogInfo($"Unloading client-only scene '{scene.name}' to match the host.");
+        _sceneLoadOperation = SceneManager.UnloadSceneAsync(scene);
+        return false;
+      }
+    }
+
+    foreach (var sceneName in expectedScenes)
+    {
+      if (loaded.Contains(sceneName)) continue;
+      LoadClientScene(sceneName, LoadSceneMode.Additive);
+      return false;
+    }
+
+    return loaded.SetEquals(expected);
   }
 }

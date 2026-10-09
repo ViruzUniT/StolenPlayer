@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using StolenPlayer.Networking;
 using StolenPlayer.Protocol;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace StolenPlayer.Sessions;
 
@@ -58,7 +59,9 @@ internal sealed class MultiplayerSession : IDisposable
   private string _status = "Ready for direct IP connections.";
   private PlayerPoseData? _lastLocalPose;
   private string _hostScene = string.Empty;
+  private string[] _hostLoadedScenes = Array.Empty<string>();
   private string _expectedHostScene = string.Empty;
+  private string[] _expectedHostScenes = Array.Empty<string>();
   private double _clientSceneSyncDeadline;
   private bool _clientSceneReady;
   private bool _clientWorldReady;
@@ -76,10 +79,11 @@ internal sealed class MultiplayerSession : IDisposable
   internal event Action<ulong, PlayerPoseData>? PlayerPoseReceived;
   internal event Action? SceneReadinessChanged;
   internal event Action<long, string>? PeerSceneReady;
-  internal event Action<string>? HostSceneReceived;
+  internal event Action<HostSceneData>? HostSceneReceived;
   internal event Action<PlayerPoseData>? HostPoseReceived;
   internal event Action<long, Guid, string, bool>? DoorIntentReceived;
   internal event Action<Guid, string, bool, bool>? DoorStateReceived;
+  internal event Func<Guid, string, bool, bool, bool>? DoorSnapshotEntryReceived;
 
   internal MultiplayerSession(PluginConfig config, string gameVersion, string pluginVersion)
   {
@@ -104,6 +108,7 @@ internal sealed class MultiplayerSession : IDisposable
   internal PlayerIdentityData[] CurrentRoster { get; private set; } = Array.Empty<PlayerIdentityData>();
   internal int ListenPort => _listenPort;
   internal string ExpectedHostScene => _expectedHostScene;
+  internal string[] ExpectedHostScenes => _expectedHostScenes;
   internal bool IsClientSceneReady => _clientSceneReady;
   internal bool IsClientWorldReady => _clientWorldReady;
   internal bool HasClientRoster => _clientRosterReceived;
@@ -673,8 +678,15 @@ internal sealed class MultiplayerSession : IDisposable
       return;
     }
 
+    if (DoorSnapshotEntryReceived == null
+        || !DoorSnapshotEntryReceived.Invoke(entry.Key, entry.SceneName, entry.IsOpen, entry.IsSlow))
+    {
+      Plugin.Log.LogError($"Could not apply door snapshot entry {entry.Key:N} in scene '{entry.SceneName}'.");
+      _transport?.Disconnect(connectionId, "A door from the authoritative snapshot could not be matched locally.");
+      return;
+    }
+
     _clientDoorSnapshotReceived++;
-    DoorStateReceived?.Invoke(entry.Key, entry.SceneName, entry.IsOpen, entry.IsSlow);
   }
 
   private void HandleDoorSnapshotComplete(long connectionId, PeerState state, ProtocolMessage message)
@@ -735,7 +747,8 @@ internal sealed class MultiplayerSession : IDisposable
       Plugin.Log.LogInfo($"TCP peer {state.RemotePeerId} ({state.RemotePlayerName}) passed the protocol handshake.");
       if (!string.IsNullOrEmpty(_hostScene))
       {
-        Send(connectionId, MessageKind.HostScene, SceneNamePayload.Encode(_hostScene), DeliveryMode.Reliable);
+        Send(connectionId, MessageKind.HostScene,
+          HostScenePayload.Encode(_hostScene, _hostLoadedScenes), DeliveryMode.Reliable);
       }
     }
   }
@@ -885,13 +898,14 @@ internal sealed class MultiplayerSession : IDisposable
 
   private void HandleHostScene(long connectionId, PeerState state, ProtocolMessage message)
   {
-    if (_isHost || !state.Ready || !SceneNamePayload.TryDecode(message.Payload, out var sceneName))
+    if (_isHost || !state.Ready || !HostScenePayload.TryDecode(message.Payload, out var hostScene))
     {
       _transport?.Disconnect(connectionId, "Unexpected or malformed host scene message.");
       return;
     }
 
-    _expectedHostScene = sceneName;
+    _expectedHostScene = hostScene.ActiveScene;
+    _expectedHostScenes = hostScene.LoadedScenes;
     _clientSceneSyncDeadline = Now + SceneSynchronizationTimeoutSeconds;
     _clientSceneReady = false;
     _clientWorldReady = false;
@@ -904,23 +918,25 @@ internal sealed class MultiplayerSession : IDisposable
     _knownPeerIds.Clear();
     CurrentRoster = Array.Empty<PlayerIdentityData>();
     RosterChanged?.Invoke(CurrentRoster);
-    SetState(SessionState.Connected, $"Host scene: {sceneName}. Loading host game scene...");
-    Plugin.Log.LogInfo($"Host selected scene '{sceneName}'; waiting for the client scene load.");
-    HostSceneReceived?.Invoke(sceneName);
+    SetState(SessionState.Connected, $"Host scene: {hostScene.ActiveScene}. Loading host game scenes...");
+    Plugin.Log.LogInfo($"Host selected active scene '{hostScene.ActiveScene}' with {hostScene.LoadedScenes.Length} loaded scene(s); synchronizing the scene set.");
+    HostSceneReceived?.Invoke(hostScene);
   }
 
   private void HandleClientSceneReady(long connectionId, PeerState state, ProtocolMessage message)
   {
-    if (!_isHost || !state.Ready || !SceneNamePayload.TryDecode(message.Payload, out var sceneName))
+    if (!_isHost || !state.Ready || !HostScenePayload.TryDecode(message.Payload, out var clientSceneSet))
     {
       _transport?.Disconnect(connectionId, "Unexpected or malformed client scene-ready message.");
       return;
     }
 
-    if (!string.Equals(sceneName, _hostScene, StringComparison.Ordinal))
+    if (!string.Equals(clientSceneSet.ActiveScene, _hostScene, StringComparison.Ordinal)
+        || !SceneSetsEqual(clientSceneSet.LoadedScenes, _hostLoadedScenes))
     {
       if (!string.IsNullOrEmpty(_hostScene))
-        Send(connectionId, MessageKind.HostScene, SceneNamePayload.Encode(_hostScene), DeliveryMode.Reliable);
+        Send(connectionId, MessageKind.HostScene,
+          HostScenePayload.Encode(_hostScene, _hostLoadedScenes), DeliveryMode.Reliable);
       return;
     }
 
@@ -934,11 +950,11 @@ internal sealed class MultiplayerSession : IDisposable
     var hasPendingPose = state.HasPendingPose;
     var pendingPose = state.PendingPose;
     state.HasPendingPose = false;
-    Plugin.Log.LogInfo($"Peer {state.RemotePeerId} loaded host scene '{sceneName}'. Sending its initial player snapshot.");
+    Plugin.Log.LogInfo($"Peer {state.RemotePeerId} loaded host scene set ({_hostLoadedScenes.Length} scene(s)). Sending its initial player snapshot.");
     RefreshRosterAndSnapshots();
     if (hasPendingPose) AcceptClientPose(state, pendingPose);
     SceneReadinessChanged?.Invoke();
-    PeerSceneReady?.Invoke(connectionId, sceneName);
+    PeerSceneReady?.Invoke(connectionId, clientSceneSet.ActiveScene);
   }
 
   private void HandleUdpPathReady(long connectionId, PeerState state, ProtocolMessage message)
@@ -1184,7 +1200,8 @@ internal sealed class MultiplayerSession : IDisposable
     {
       if (pair.Value.Ready)
       {
-        Send(pair.Key, MessageKind.ClientSceneReady, SceneNamePayload.Encode(sceneName), DeliveryMode.Reliable);
+        Send(pair.Key, MessageKind.ClientSceneReady,
+          HostScenePayload.Encode(sceneName, CaptureLoadedSceneNames(sceneName)), DeliveryMode.Reliable);
         Plugin.Log.LogInfo($"Client loaded authoritative host scene '{sceneName}'. Waiting for the host's roster, spawn pose, and world snapshot.");
         return true;
       }
@@ -1479,7 +1496,9 @@ internal sealed class MultiplayerSession : IDisposable
     _peers.Clear();
     _knownPeerIds.Clear();
     _hostScene = string.Empty;
+    _hostLoadedScenes = Array.Empty<string>();
     _expectedHostScene = string.Empty;
+    _expectedHostScenes = Array.Empty<string>();
     _clientSceneSyncDeadline = 0;
     _clientSceneReady = false;
     _clientWorldReady = false;
@@ -1568,6 +1587,7 @@ internal sealed class MultiplayerSession : IDisposable
   private void BeginHostScene(string sceneName)
   {
     _hostScene = sceneName;
+    _hostLoadedScenes = CaptureLoadedSceneNames(sceneName);
     _rosterRevision++;
     _pendingWorldPoses.Clear();
     _knownPeerIds.Clear();
@@ -1590,11 +1610,12 @@ internal sealed class MultiplayerSession : IDisposable
     {
       if (_peers.TryGetValue(connectionId, out var peer) && peer.Ready)
       {
-        Send(connectionId, MessageKind.HostScene, SceneNamePayload.Encode(sceneName), DeliveryMode.Reliable);
+        Send(connectionId, MessageKind.HostScene,
+          HostScenePayload.Encode(sceneName, _hostLoadedScenes), DeliveryMode.Reliable);
       }
     }
 
-    Plugin.Log.LogInfo($"Host scene is now '{sceneName}'. Waiting for connected clients to load it.");
+    Plugin.Log.LogInfo($"Host scene set is now active='{sceneName}', loaded={string.Join(", ", _hostLoadedScenes)}. Waiting for connected clients to load it.");
     RefreshRosterAndSnapshots();
     SceneReadinessChanged?.Invoke();
   }
@@ -1603,6 +1624,7 @@ internal sealed class MultiplayerSession : IDisposable
   {
     if (!_isHost) return;
     _hostScene = string.Empty;
+    _hostLoadedScenes = Array.Empty<string>();
     _lastLocalPose = null;
     _pendingWorldPoses.Clear();
     foreach (var peer in _peers.Values)
@@ -1615,6 +1637,31 @@ internal sealed class MultiplayerSession : IDisposable
     }
 
     SceneReadinessChanged?.Invoke();
+  }
+
+  private static string[] CaptureLoadedSceneNames(string activeScene)
+  {
+    var names = new List<string> { activeScene };
+    var uniqueNames = new HashSet<string>(StringComparer.Ordinal) { activeScene };
+    for (var index = 0; index < SceneManager.sceneCount; index++)
+    {
+      var scene = SceneManager.GetSceneAt(index);
+      if (!scene.IsValid() || !scene.isLoaded || string.IsNullOrWhiteSpace(scene.path)
+          || string.IsNullOrWhiteSpace(scene.name) || !uniqueNames.Add(scene.name)) continue;
+      names.Add(scene.name);
+    }
+
+    return names.ToArray();
+  }
+
+  private static bool SceneSetsEqual(string[] left, string[] right)
+  {
+    if (left == null || right == null || left.Length != right.Length) return false;
+    var names = new HashSet<string>(left, StringComparer.Ordinal);
+    if (names.Count != left.Length) return false;
+    foreach (var name in right)
+      if (!names.Contains(name)) return false;
+    return true;
   }
 
   private readonly struct RemotePoseSnapshot

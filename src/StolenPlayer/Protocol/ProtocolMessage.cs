@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 
@@ -349,6 +350,81 @@ internal static class SceneNamePayload
   }
 }
 
+internal readonly struct HostSceneData
+{
+  internal HostSceneData(string activeScene, string[] loadedScenes)
+  {
+    ActiveScene = activeScene;
+    LoadedScenes = loadedScenes;
+  }
+
+  internal string ActiveScene { get; }
+  internal string[] LoadedScenes { get; }
+}
+
+internal static class HostScenePayload
+{
+  private const int MaximumSceneCount = 32;
+
+  internal static byte[] Encode(string activeScene, string[] loadedScenes)
+  {
+    if (string.IsNullOrWhiteSpace(activeScene) || loadedScenes == null
+        || loadedScenes.Length == 0 || loadedScenes.Length > MaximumSceneCount)
+      throw new ArgumentException("Host scene set is invalid.");
+
+    var uniqueScenes = new HashSet<string>(StringComparer.Ordinal);
+    if (!uniqueScenes.Add(activeScene)) throw new ArgumentException("Host active scene is duplicated.");
+    var result = new List<byte> { (byte)loadedScenes.Length };
+    AppendScene(activeScene, result);
+    for (var i = 0; i < loadedScenes.Length; i++)
+    {
+      var scene = loadedScenes[i];
+      if (string.Equals(scene, activeScene, StringComparison.Ordinal)) continue;
+      if (string.IsNullOrWhiteSpace(scene) || !uniqueScenes.Add(scene))
+        throw new ArgumentException("Host loaded scene names must be non-empty and unique.");
+      AppendScene(scene, result);
+    }
+
+    if (uniqueScenes.Count != loadedScenes.Length)
+      throw new ArgumentException("Host scene set must contain its active scene exactly once.");
+    return result.ToArray();
+  }
+
+  internal static bool TryDecode(byte[] payload, out HostSceneData sceneData)
+  {
+    sceneData = default;
+    if (payload == null || payload.Length < 3 || payload[0] == 0 || payload[0] > MaximumSceneCount)
+      return false;
+
+    var count = payload[0];
+    var scenes = new string[count];
+    var uniqueScenes = new HashSet<string>(StringComparer.Ordinal);
+    var offset = 1;
+    for (var i = 0; i < count; i++)
+    {
+      if (offset >= payload.Length) return false;
+      var length = payload[offset++];
+      if (length == 0 || payload.Length - offset < length) return false;
+      var scenePayload = new byte[length + 1];
+      scenePayload[0] = length;
+      Array.Copy(payload, offset, scenePayload, 1, length);
+      if (!SceneNamePayload.TryDecode(scenePayload, out var sceneName) || !uniqueScenes.Add(sceneName)) return false;
+      scenes[i] = sceneName;
+      offset += length;
+    }
+
+    if (offset != payload.Length) return false;
+    sceneData = new HostSceneData(scenes[0], scenes);
+    return true;
+  }
+
+  private static void AppendScene(string sceneName, List<byte> output)
+  {
+    var encoded = SceneNamePayload.Encode(sceneName);
+    for (var i = 0; i < encoded.Length; i++) output.Add(encoded[i]);
+  }
+}
+
 internal readonly struct PlayerPoseData
 {
   internal const byte Moving = 1;
@@ -652,7 +728,7 @@ internal readonly struct ProtocolMessage
 internal static class ProtocolCodec
 {
   internal const uint Magic = 0x43504C53; // "SLPC" in little-endian bytes.
-  internal const ushort CurrentVersion = 8;
+  internal const ushort CurrentVersion = 9;
   internal const int HeaderLength = 19;
   internal const int MaximumMessageSize = 64 * 1024;
 

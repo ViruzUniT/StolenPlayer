@@ -22,6 +22,7 @@ internal static class ProtocolCodecTests
     RoundTripsPlayerPoseAndRoster();
     UdpPoseDatagramsRoundTripAndRejectMalformedPackets();
     RoundTripsSceneNamePayload();
+    HostScenePayloadRoundTripsAndRejectsMalformedData();
     DoorInteractionPayloadRoundTripsAndRejectsMalformedData();
     DoorSnapshotPayloadRoundTripsAndRejectsMalformedData();
     StableObjectIdentityTests.RunAll();
@@ -180,6 +181,21 @@ internal static class ProtocolCodecTests
     Assert(SceneNamePayload.TryDecode(payload, out var sceneName) && sceneName == "level1", "Host scene name did not round trip.");
     Assert(!SceneNamePayload.TryDecode(new byte[] { 3, (byte)'a', (byte)'/', (byte)'b' }, out _), "Scene path was accepted as a scene name.");
     Assert(!SceneNamePayload.TryDecode(new byte[] { 4, (byte)'a' }, out _), "Truncated scene name was accepted.");
+  }
+
+  private static void HostScenePayloadRoundTripsAndRejectsMalformedData()
+  {
+    var scenes = new[] { "MainScene", "MadisonSt" };
+    var payload = HostScenePayload.Encode("MainScene", scenes);
+    Assert(HostScenePayload.TryDecode(payload, out var decoded), "Valid host scene set was rejected.");
+    Assert(decoded.ActiveScene == "MainScene" && decoded.LoadedScenes.SequenceEqual(scenes),
+      "Host scene set changed during round trip.");
+
+    payload[0] = 3;
+    Assert(!HostScenePayload.TryDecode(payload, out _), "Truncated host scene set was accepted.");
+    payload = HostScenePayload.Encode("MainScene", scenes);
+    payload[1] = 0;
+    Assert(!HostScenePayload.TryDecode(payload, out _), "Empty host scene name was accepted.");
   }
 
   private static void DoorInteractionPayloadRoundTripsAndRejectsMalformedData()

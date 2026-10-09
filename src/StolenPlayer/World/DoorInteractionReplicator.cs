@@ -32,6 +32,7 @@ internal sealed class DoorInteractionReplicator : MonoBehaviour
     Current = this;
     session.DoorIntentReceived += OnDoorIntent;
     session.DoorStateReceived += OnDoorState;
+    session.DoorSnapshotEntryReceived += ApplySnapshotEntry;
     session.PeerSceneReady += OnPeerSceneReady;
     if (OpenSpeedField == null)
       Plugin.Log.LogError("Could not find Door.openSpeed; replicated door animations will be disabled.");
@@ -43,6 +44,7 @@ internal sealed class DoorInteractionReplicator : MonoBehaviour
     {
       _session.DoorIntentReceived -= OnDoorIntent;
       _session.DoorStateReceived -= OnDoorState;
+      _session.DoorSnapshotEntryReceived -= ApplySnapshotEntry;
       _session.PeerSceneReady -= OnPeerSceneReady;
     }
     if (Current == this) Current = null;
@@ -181,6 +183,16 @@ internal sealed class DoorInteractionReplicator : MonoBehaviour
 
     if ((door.isOpen != isOpen || door.openingSlowly != isSlow) && !ApplyState(door, isOpen, isSlow))
       Plugin.Log.LogError($"Client could not apply replicated door state for {key:N}.");
+  }
+
+  private bool ApplySnapshotEntry(Guid key, string sceneName, bool isOpen, bool isSlow)
+  {
+    if (_session == null || _session.IsHost || _identities == null
+        || !string.Equals(SceneManager.GetActiveScene().name, sceneName, StringComparison.Ordinal)
+        || !_identities.TryGetDoor(key, out var door) || door == null
+        || !IsStandardDoorKind(door)) return false;
+
+    return (door.isOpen == isOpen && door.openingSlowly == isSlow) || ApplyState(door, isOpen, isSlow);
   }
 
   private static bool ApplyState(Door door, bool isOpen, bool isSlow)
