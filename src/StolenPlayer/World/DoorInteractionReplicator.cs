@@ -136,14 +136,6 @@ internal sealed class DoorInteractionReplicator : MonoBehaviour
       return;
     }
 
-    var eyePosition = playerPosition + Vector3.up * 0.5f;
-    if (!Physics.Linecast(eyePosition, doorPosition, out var hit)
-        || (hit.transform != door.transform && !hit.transform.IsChildOf(door.transform)))
-    {
-      Plugin.Log.LogWarning($"Rejected door intent {key:N} from peer {connectionId}: host line-of-sight check failed.");
-      return;
-    }
-
     if (!ApplyState(door, !door.isOpen))
     {
       Plugin.Log.LogError($"Host could not apply authoritative door state for {key:N}; no state was broadcast.");

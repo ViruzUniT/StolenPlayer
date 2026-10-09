@@ -8,6 +8,7 @@ namespace StolenPlayer;
 internal static class RemotePlayerVisualPreview
 {
   private const string VerifiedTemplateSuffix = "NPCs/101/NPC";
+  private static GameObject? _cachedVisualTemplate;
   internal static bool TryCreate(Camera? camera, PluginConfig config, out GameObject? preview, out string error)
   {
     preview = null;
@@ -36,36 +37,53 @@ internal static class RemotePlayerVisualPreview
 
     try
     {
-      var templates = Resources.FindObjectsOfTypeAll<GameObject>()
-        .Where(gameObject => gameObject != null && gameObject.scene.IsValid() && gameObject.scene.isLoaded && gameObject.name == "NPC")
-        .Where(gameObject => gameObject.GetComponent<Animation>() != null)
-        .Where(gameObject => GetHierarchyPath(gameObject.transform).EndsWith(VerifiedTemplateSuffix, StringComparison.Ordinal))
-        .Select(gameObject => new
-        {
-          GameObject = gameObject,
-          RendererCount = gameObject.GetComponentsInChildren<SkinnedMeshRenderer>(true)
-            .Count(renderer => renderer != null && renderer.enabled && IsActiveBelowRoot(renderer.transform, gameObject.transform))
-        })
-        .Where(candidate => candidate.RendererCount > 0)
-        .OrderByDescending(candidate => candidate.RendererCount)
-        .ThenBy(candidate => candidate.GameObject.scene.name, StringComparer.Ordinal)
-        .ThenBy(candidate => GetHierarchyPath(candidate.GameObject.transform), StringComparer.Ordinal)
-        .ToArray();
+      var templates = new List<TemplateCandidate>();
+      if (_cachedVisualTemplate != null)
+      {
+        var cachedRendererCount = CountVisibleMeshes(_cachedVisualTemplate);
+        if (cachedRendererCount > 0 && _cachedVisualTemplate.GetComponent<Animation>() != null)
+          templates.Add(new TemplateCandidate(_cachedVisualTemplate, cachedRendererCount, "Persistent visual cache", "NPCs/101/NPC"));
+        else
+          _cachedVisualTemplate = null;
+      }
 
-      if (templates.Length == 0)
+      if (templates.Count == 0)
+      {
+        foreach (var candidate in Resources.FindObjectsOfTypeAll<GameObject>())
+        {
+          if (candidate == null || !candidate.scene.IsValid() || !candidate.scene.isLoaded
+              || candidate.name != "NPC" || candidate.GetComponent<Animation>() == null)
+            continue;
+          var path = GetHierarchyPath(candidate.transform);
+          if (!path.EndsWith(VerifiedTemplateSuffix, StringComparison.Ordinal)) continue;
+          var rendererCount = CountVisibleMeshes(candidate);
+          if (rendererCount > 0)
+            templates.Add(new TemplateCandidate(candidate, rendererCount, candidate.scene.name, path));
+        }
+
+        templates.Sort((left, right) =>
+        {
+          var rank = right.RendererCount.CompareTo(left.RendererCount);
+          if (rank != 0) return rank;
+          var scene = string.Compare(left.SceneName, right.SceneName, StringComparison.Ordinal);
+          return scene != 0 ? scene : string.Compare(left.Path, right.Path, StringComparison.Ordinal);
+        });
+      }
+
+      if (templates.Count == 0)
       {
         error = "No scene NPC with the inspected hierarchy, legacy Animation, and enabled skinned meshes is loaded.";
         return false;
       }
 
       var template = templates[0];
-      var templatePath = GetHierarchyPath(template.GameObject.transform);
-      if (templates.Length > 1
+      var templatePath = template.Path;
+      if (templates.Count > 1
           && templates[1].RendererCount == template.RendererCount
-          && string.Equals(templates[1].GameObject.scene.name, template.GameObject.scene.name, StringComparison.Ordinal)
+          && string.Equals(templates[1].SceneName, template.SceneName, StringComparison.Ordinal)
           && string.Equals(GetHierarchyPath(templates[1].GameObject.transform), templatePath, StringComparison.Ordinal))
       {
-        error = $"Multiple equally ranked inactive NPC templates were found at '{template.GameObject.scene.name}:{templatePath}'. Preview was not spawned.";
+        error = $"Multiple equally ranked inactive NPC templates were found at '{template.SceneName}:{templatePath}'. Preview was not spawned.";
         return false;
       }
 
@@ -151,6 +169,15 @@ internal static class RemotePlayerVisualPreview
         return false;
       }
 
+      if (_cachedVisualTemplate == null)
+      {
+        _cachedVisualTemplate = UnityEngine.Object.Instantiate(clone, (Transform?)null, true);
+        _cachedVisualTemplate.name = "StolenPlayer Cached NPC Visual Template";
+        _cachedVisualTemplate.SetActive(false);
+        UnityEngine.Object.DontDestroyOnLoad(_cachedVisualTemplate);
+        Plugin.Log.LogInfo("Cached the verified NPC visual template persistently for later peer spawns and reconnects.");
+      }
+
       clone.transform.SetParent(null, true);
       UnityEngine.Object.Destroy(staging);
       staging = null;
@@ -162,11 +189,11 @@ internal static class RemotePlayerVisualPreview
       clone.SetActive(true);
 
       avatar = clone;
-      var visibleParts = template.GameObject.GetComponentsInChildren<SkinnedMeshRenderer>(true)
-        .Where(renderer => renderer != null && renderer.enabled && IsActiveBelowRoot(renderer.transform, template.GameObject.transform))
+      var visibleParts = clone.GetComponentsInChildren<SkinnedMeshRenderer>(true)
+        .Where(renderer => renderer != null && renderer.enabled && IsActiveBelowRoot(renderer.transform, clone.transform))
         .Select(renderer => $"{GetHierarchyPath(renderer.transform)} ({renderer.sharedMesh?.name ?? "no mesh"})")
         .ToArray();
-      Plugin.Log.LogInfo($"Spawned local visual-only NPC preview from '{template.GameObject.scene.name}:{templatePath}' using idle '{idleClipName}' with {template.RendererCount} skinned mesh parts: {string.Join("; ", visibleParts)}.");
+      Plugin.Log.LogInfo($"Spawned local visual-only NPC preview from '{template.SceneName}:{templatePath}' using idle '{idleClipName}' with {template.RendererCount} skinned mesh parts: {string.Join("; ", visibleParts)}.");
       return true;
     }
     catch (Exception exception)
@@ -243,6 +270,28 @@ internal static class RemotePlayerVisualPreview
     }
 
     return current == root;
+  }
+
+  private static int CountVisibleMeshes(GameObject root)
+  {
+    return root.GetComponentsInChildren<SkinnedMeshRenderer>(true)
+      .Count(renderer => renderer != null && renderer.enabled && IsActiveBelowRoot(renderer.transform, root.transform));
+  }
+
+  private sealed class TemplateCandidate
+  {
+    internal TemplateCandidate(GameObject gameObject, int rendererCount, string sceneName, string path)
+    {
+      GameObject = gameObject;
+      RendererCount = rendererCount;
+      SceneName = sceneName;
+      Path = path;
+    }
+
+    internal GameObject GameObject { get; }
+    internal int RendererCount { get; }
+    internal string SceneName { get; }
+    internal string Path { get; }
   }
 
   private static string GetHierarchyPath(Transform transform)
