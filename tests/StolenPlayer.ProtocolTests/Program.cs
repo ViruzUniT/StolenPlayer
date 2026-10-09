@@ -193,11 +193,12 @@ internal static class ProtocolCodecTests
     Assert(!UdpPoseDatagramCodec.TryDecode(new byte[UdpPoseDatagramCodec.MaximumDatagramLength + 1], out _), "Oversized UDP pose datagram was accepted.");
 
     var accepted = WelcomePayload.EncodeAccepted(token);
-    Assert(WelcomePayload.TryDecode(accepted, out var acceptedFlag, out var decodedToken) && acceptedFlag
+    Assert(WelcomePayload.TryDecode(accepted, out var acceptedFlag, out var decodedToken, out var rejectionReason) && acceptedFlag
       && decodedToken.SequenceEqual(token), "Accepted welcome token did not round trip.");
-    Assert(WelcomePayload.TryDecode(WelcomePayload.EncodeRejected(), out acceptedFlag, out _) && !acceptedFlag,
-      "Rejected welcome did not round trip.");
-    Assert(!WelcomePayload.TryDecode(new byte[] { 1 }, out _, out _), "Accepted welcome without a UDP token was accepted.");
+    const string rejection = "Player name is already in use.";
+    Assert(WelcomePayload.TryDecode(WelcomePayload.EncodeRejected(rejection), out acceptedFlag, out _, out rejectionReason)
+      && !acceptedFlag && rejectionReason == rejection, "Rejected welcome reason did not round trip.");
+    Assert(!WelcomePayload.TryDecode(new byte[] { 1 }, out _, out _, out _), "Accepted welcome without a UDP token was accepted.");
   }
 
   private static void TcpTransportConnectsAndFramesPackets()

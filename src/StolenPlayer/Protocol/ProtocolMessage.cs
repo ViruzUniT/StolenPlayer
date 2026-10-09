@@ -137,6 +137,8 @@ internal static class UdpPoseDatagramCodec
 internal static class WelcomePayload
 {
   private const int TokenLength = 16;
+  private const int MaximumRejectionBytes = 128;
+  private static readonly UTF8Encoding StrictUtf8 = new UTF8Encoding(false, true);
 
   internal static byte[] EncodeAccepted(byte[] token)
   {
@@ -147,14 +149,43 @@ internal static class WelcomePayload
     return payload;
   }
 
-  internal static byte[] EncodeRejected() => new byte[] { 0 };
+  internal static byte[] EncodeRejected(string reason)
+  {
+    var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "Host rejected the connection." : reason.Trim();
+    var reasonBytes = Encoding.UTF8.GetBytes(normalizedReason);
+    while (reasonBytes.Length > MaximumRejectionBytes && normalizedReason.Length > 0)
+    {
+      normalizedReason = normalizedReason.Substring(0, normalizedReason.Length - 1);
+      reasonBytes = Encoding.UTF8.GetBytes(normalizedReason);
+    }
+    if (reasonBytes.Length == 0) throw new ArgumentException("A rejection reason is required.", nameof(reason));
+    var payload = new byte[sizeof(byte) * 2 + reasonBytes.Length];
+    payload[0] = 0;
+    payload[1] = (byte)reasonBytes.Length;
+    Array.Copy(reasonBytes, 0, payload, 2, reasonBytes.Length);
+    return payload;
+  }
 
-  internal static bool TryDecode(byte[] payload, out bool accepted, out byte[] token)
+  internal static bool TryDecode(byte[] payload, out bool accepted, out byte[] token, out string rejectionReason)
   {
     accepted = false;
     token = Array.Empty<byte>();
-    if (payload == null || (payload.Length != 1 && payload.Length != 1 + TokenLength)) return false;
-    if (payload[0] == 0) return payload.Length == 1;
+    rejectionReason = string.Empty;
+    if (payload == null || payload.Length < 1) return false;
+    if (payload[0] == 0)
+    {
+      if (payload.Length < sizeof(byte) * 2 || payload[1] == 0 || payload[1] > MaximumRejectionBytes
+          || payload.Length != sizeof(byte) * 2 + payload[1]) return false;
+      try
+      {
+        rejectionReason = StrictUtf8.GetString(payload, 2, payload[1]);
+        return !string.IsNullOrWhiteSpace(rejectionReason);
+      }
+      catch (DecoderFallbackException)
+      {
+        return false;
+      }
+    }
     if (payload[0] != 1 || payload.Length != 1 + TokenLength) return false;
     token = new byte[TokenLength];
     Array.Copy(payload, 1, token, 0, TokenLength);

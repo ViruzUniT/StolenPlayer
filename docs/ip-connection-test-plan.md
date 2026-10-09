@@ -16,15 +16,15 @@ The build/test checks do not substitute for these in-game checks. If the menu pa
 
 ## Same-computer loopback
 
-1. Install the same plugin build in two isolated TS2 copies or run two game instances with separate user profiles.
-2. Start one instance, open the F8 panel, choose port `27960`, and select **Host direct IP session**.
-3. Start the client instance, enter `127.0.0.1` and port `27960`, then select **Join IP**.
-4. Confirm the host shows one ready peer and the client loads the host's current scene and spawn position.
-5. Confirm both players can see the other move; check that walking/running animations follow movement and the idle pose remains upright.
-6. Set distinct names in both F8 panels, save them, and reconnect. Confirm each side's roster shows the expected names and each BepInEx config retains its own value after restart. Try joining with the same name as the host and confirm the host rejects the duplicate without losing its session.
-7. In each BepInEx log, compare the `Static world identity scan` counts for the same loaded scenes. The scanner identity now includes serialized sibling and same-object component ordinals to distinguish repeated names. Investigate any remaining `Door identity rejected` messages; object keys are diagnostic only and do not yet drive gameplay replication.
-8. Confirm the host logs `UDP movement listener opened` and both sides log `UDP movement path established/confirmed`. Move on both sides and verify poses stay responsive. Test with UDP blocked locally or by firewall and confirm TCP pose fallback is logged and movement still works. For internet play, forward/allow the session port for both TCP and UDP.
-9. Leave from either side and confirm the other side detects the disconnect and removes its avatar.
+1. Close any running TS2 instance. Run `scripts/launch-local-session.ps1 -GamePath '<game path>' -ClientCount 1 -PlayerNames @('Host','Client1')`. The script deploys the plugin, creates per-instance configs and starts one host plus one client. Use `-ClientCount 2` and three unique names to test three players total.
+2. Confirm both windows start. The host should listen on TCP+UDP port `27960`; the client should auto-join `127.0.0.1:27960` and load the host's scene.
+3. Confirm both players can see the other move; check that walking/running animations follow movement and the idle pose remains upright.
+4. Confirm each F8 panel shows its own name and the same roster. Try a manual join using a duplicate name; the host should reject it without losing its session.
+5. In each instance's `BepInEx/LogOutput.log`, compare `Static world identity scan` counts for the same loaded scenes. The scanner identity includes serialized sibling and same-object component ordinals. Door keys remain diagnostic only and do not drive gameplay replication.
+6. Confirm the host logs `UDP movement listener opened` and both sides log `UDP movement path established/confirmed`. Move on both sides and verify poses stay responsive. Test with UDP blocked locally or by firewall and confirm TCP pose fallback is logged and movement still works.
+7. Leave from either side and confirm the other side detects the disconnect and removes its avatar.
+
+The launcher creates separate BepInEx configs, logs, and player names, but all processes share the current Windows user's TS2 save location. Do not save or test inventory/progression in this harness.
 
 ## Local network
 

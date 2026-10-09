@@ -516,7 +516,8 @@ internal sealed class MultiplayerSession : IDisposable
     if (!string.Equals(gameVersion, _gameVersion, StringComparison.Ordinal)
         || !string.Equals(pluginVersion, _pluginVersion, StringComparison.Ordinal))
     {
-      Send(connectionId, MessageKind.Welcome, WelcomePayload.EncodeRejected(), DeliveryMode.Reliable);
+      Send(connectionId, MessageKind.Welcome, WelcomePayload.EncodeRejected(
+        $"Peer game/plugin version {gameVersion}/{pluginVersion} is incompatible with {_gameVersion}/{_pluginVersion}."), DeliveryMode.Reliable);
       state.DisconnectAt = Now + RejectedPeerCloseDelaySeconds;
       state.DisconnectReason = $"Peer game/plugin version {gameVersion}/{pluginVersion} is incompatible with {_gameVersion}/{_pluginVersion}.";
       return;
@@ -526,7 +527,8 @@ internal sealed class MultiplayerSession : IDisposable
         || HasPeerName(playerName, connectionId)))
     {
       Plugin.Log.LogWarning($"Rejected peer {state.RemotePeerId}: player name '{playerName}' is already in use.");
-      Send(connectionId, MessageKind.Welcome, WelcomePayload.EncodeRejected(), DeliveryMode.Reliable);
+      Send(connectionId, MessageKind.Welcome, WelcomePayload.EncodeRejected(
+        $"Player name '{playerName}' is already in use in this session."), DeliveryMode.Reliable);
       state.DisconnectAt = Now + RejectedPeerCloseDelaySeconds;
       state.DisconnectReason = $"Player name '{playerName}' is already in use in this session.";
       return;
@@ -1158,7 +1160,8 @@ internal sealed class MultiplayerSession : IDisposable
 
   private void HandleWelcome(long connectionId, PeerState state, ProtocolMessage message)
   {
-    if (_isHost || !state.ReceivedHello || !WelcomePayload.TryDecode(message.Payload, out var accepted, out var token))
+    if (_isHost || !state.ReceivedHello
+        || !WelcomePayload.TryDecode(message.Payload, out var accepted, out var token, out var rejectionReason))
     {
       _transport?.Disconnect(connectionId, "Unexpected or malformed protocol welcome.");
       return;
@@ -1167,7 +1170,9 @@ internal sealed class MultiplayerSession : IDisposable
     if (!accepted)
     {
       _transport?.Disconnect(connectionId, "Host rejected the protocol handshake.");
-      SetState(SessionState.Error, "Host rejected the protocol handshake.");
+      SetState(SessionState.Error, string.IsNullOrWhiteSpace(rejectionReason)
+        ? "Host rejected the protocol handshake."
+        : rejectionReason);
       return;
     }
 
