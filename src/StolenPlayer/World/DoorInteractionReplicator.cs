@@ -13,7 +13,10 @@ namespace StolenPlayer.World;
 internal sealed class DoorInteractionReplicator : MonoBehaviour
 {
   private const float InteractionRange = 2.75f;
-  private const float DuplicateRequestSeconds = 3f;
+  // Door.Update and Door.SlowFailed can both report the same single interaction.
+  // Suppress only that near-simultaneous duplicate; a multi-second lockout makes
+  // legitimate consecutive toggles feel unresponsive after the door is usable.
+  private const float DuplicateRequestSeconds = 0.25f;
   private static readonly FieldInfo? OpenSpeedField = typeof(Door).GetField("openSpeed", BindingFlags.Instance | BindingFlags.NonPublic);
   private readonly Dictionary<Guid, float> _lastRequestedAt = new Dictionary<Guid, float>();
   private MultiplayerSession? _session;
