@@ -73,8 +73,8 @@ internal sealed class MultiplayerSession : IDisposable
   internal event Action? SceneReadinessChanged;
   internal event Action<string>? HostSceneReceived;
   internal event Action<PlayerPoseData>? HostPoseReceived;
-  internal event Action<long, Guid, string>? DoorIntentReceived;
-  internal event Action<Guid, string, bool>? DoorStateReceived;
+  internal event Action<long, Guid, string, bool>? DoorIntentReceived;
+  internal event Action<Guid, string, bool, bool>? DoorStateReceived;
 
   internal MultiplayerSession(PluginConfig config, string gameVersion, string pluginVersion)
   {
@@ -118,7 +118,7 @@ internal sealed class MultiplayerSession : IDisposable
     LocalPlayerName = normalizedName;
   }
 
-  internal bool RequestDoorToggle(Guid key, string sceneName)
+  internal bool RequestDoorToggle(Guid key, string sceneName, bool isSlow)
   {
     if (_disposed || _isHost || !_clientWorldReady || key == Guid.Empty
         || string.IsNullOrWhiteSpace(sceneName) || _lastLocalPose == null
@@ -127,17 +127,18 @@ internal sealed class MultiplayerSession : IDisposable
     {
       if (!pair.Value.Ready) continue;
       Send(pair.Key, MessageKind.DoorIntent,
-        DoorInteractionPayload.Encode(key, sceneName, 0), DeliveryMode.Reliable);
+        DoorInteractionPayload.Encode(key, sceneName, isSlow ? (byte)3 : (byte)0), DeliveryMode.Reliable);
       return true;
     }
 
     return false;
   }
 
-  internal void BroadcastDoorState(Guid key, string sceneName, bool isOpen)
+  internal void BroadcastDoorState(Guid key, string sceneName, bool isOpen, bool isSlow)
   {
     if (_disposed || !_isHost || key == Guid.Empty || string.IsNullOrWhiteSpace(sceneName)) return;
-    var payload = DoorInteractionPayload.Encode(key, sceneName, isOpen ? (byte)2 : (byte)1);
+    var action = isSlow ? (isOpen ? (byte)5 : (byte)4) : (isOpen ? (byte)2 : (byte)1);
+    var payload = DoorInteractionPayload.Encode(key, sceneName, action);
     var recipients = new List<long>();
     foreach (var peer in _peers)
       if (peer.Value.Ready && peer.Value.SceneReady) recipients.Add(peer.Key);
@@ -557,7 +558,7 @@ internal sealed class MultiplayerSession : IDisposable
     if (!_isHost || !state.Ready || !state.SceneReady || !state.HasPose
         || Now - state.LastPoseReceiveTime > 1.25
         || !DoorInteractionPayload.TryDecode(message.Payload, out var intent)
-        || intent.Action != 0 || _lastLocalPose == null
+        || (intent.Action != 0 && intent.Action != 3) || _lastLocalPose == null
         || !string.Equals(intent.SceneName, _lastLocalPose.Value.SceneName, StringComparison.Ordinal)
         || !string.Equals(intent.SceneName, state.LastPose.SceneName, StringComparison.Ordinal))
     {
@@ -565,14 +566,14 @@ internal sealed class MultiplayerSession : IDisposable
       return;
     }
 
-    DoorIntentReceived?.Invoke(connectionId, intent.Key, intent.SceneName);
+    DoorIntentReceived?.Invoke(connectionId, intent.Key, intent.SceneName, intent.IsSlow);
   }
 
   private void HandleDoorState(PeerState state, ProtocolMessage message)
   {
     if (_isHost || !state.Ready || state.RemotePeerId != HostPeerId
         || !DoorInteractionPayload.TryDecode(message.Payload, out var update)
-        || (update.Action != 1 && update.Action != 2)
+        || (update.Action != 1 && update.Action != 2 && update.Action != 4 && update.Action != 5)
         || !string.Equals(update.SceneName, _expectedHostScene, StringComparison.Ordinal)
         || _lastLocalPose == null
         || !string.Equals(update.SceneName, _lastLocalPose.Value.SceneName, StringComparison.Ordinal))
@@ -581,7 +582,7 @@ internal sealed class MultiplayerSession : IDisposable
       return;
     }
 
-    DoorStateReceived?.Invoke(update.Key, update.SceneName, update.Action == 2);
+    DoorStateReceived?.Invoke(update.Key, update.SceneName, update.IsOpen, update.IsSlow);
   }
 
   private void HandleHello(long connectionId, PeerState state, ProtocolMessage message)

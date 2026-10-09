@@ -184,16 +184,20 @@ internal static class ProtocolCodecTests
   private static void DoorInteractionPayloadRoundTripsAndRejectsMalformedData()
   {
     var key = Guid.NewGuid();
-    foreach (var action in new byte[] { 0, 1, 2 })
+    foreach (var action in new byte[] { 0, 1, 2, 3, 4, 5 })
     {
       var payload = DoorInteractionPayload.Encode(key, "MainScene", action);
       Assert(DoorInteractionPayload.TryDecode(payload, out var decoded), "Valid door interaction payload was rejected.");
       Assert(decoded.Key == key && decoded.SceneName == "MainScene" && decoded.Action == action,
         "Door interaction payload changed fields during round trip.");
+      Assert(decoded.IsSlow == (action == 3 || action == 4 || action == 5),
+        "Door interaction payload changed the slow interaction mode.");
+      Assert(decoded.IsOpen == (action == 2 || action == 5),
+        "Door interaction payload changed the authoritative open state.");
     }
 
     var malformed = DoorInteractionPayload.Encode(key, "MainScene", 0);
-    malformed[16] = 3;
+    malformed[16] = 6;
     Assert(!DoorInteractionPayload.TryDecode(malformed, out _), "Unknown door interaction action was accepted.");
     malformed = DoorInteractionPayload.Encode(key, "MainScene", 0);
     malformed[17]++;

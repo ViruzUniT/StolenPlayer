@@ -18,6 +18,7 @@ internal sealed class DoorInteractionReplicator : MonoBehaviour
   // legitimate consecutive toggles feel unresponsive after the door is usable.
   private const float DuplicateRequestSeconds = 0.25f;
   private static readonly FieldInfo? OpenSpeedField = typeof(Door).GetField("openSpeed", BindingFlags.Instance | BindingFlags.NonPublic);
+  private static readonly FieldInfo? SlowOpenSpeedMultiplierField = typeof(Door).GetField("slowOpenSpeedMulti", BindingFlags.Instance | BindingFlags.Public);
   private readonly Dictionary<Guid, float> _lastRequestedAt = new Dictionary<Guid, float>();
   private MultiplayerSession? _session;
   private StaticWorldIdentityScanner? _identities;
@@ -65,7 +66,7 @@ internal sealed class DoorInteractionReplicator : MonoBehaviour
       return true;
     }
 
-    TryRequestToggle(door);
+    TryRequestToggle(door, isSlow: true);
     return true;
   }
 
@@ -77,7 +78,7 @@ internal sealed class DoorInteractionReplicator : MonoBehaviour
       Plugin.Log.LogWarning("Blocked Door.Use on a client before initial world synchronization completed.");
       return false;
     }
-    if (IsOrdinaryUnlockedDoor(door)) TryRequestToggle(door);
+    if (IsOrdinaryUnlockedDoor(door)) TryRequestToggle(door, isSlow: false);
     else Plugin.Log.LogWarning($"Blocked unsupported client Door.Use at '{door.name}'.");
     return false;
   }
@@ -87,10 +88,10 @@ internal sealed class DoorInteractionReplicator : MonoBehaviour
     if (_session == null || !_session.IsHost || previousIsOpen == door.isOpen
         || !IsStandardDoorKind(door) || _identities == null
         || !_identities.TryGetKey(door, out var key)) return;
-    _session.BroadcastDoorState(key.Value, SceneManager.GetActiveScene().name, door.isOpen);
+    _session.BroadcastDoorState(key.Value, SceneManager.GetActiveScene().name, door.isOpen, door.openingSlowly);
   }
 
-  private void TryRequestToggle(Door door)
+  private void TryRequestToggle(Door door, bool isSlow)
   {
     if (_session == null || _identities == null || !IsOrdinaryUnlockedDoor(door)
         || !_identities.TryGetKey(door, out var key))
@@ -101,7 +102,7 @@ internal sealed class DoorInteractionReplicator : MonoBehaviour
 
     var now = Time.unscaledTime;
     if (_lastRequestedAt.TryGetValue(key.Value, out var last) && now - last < DuplicateRequestSeconds) return;
-    if (_session.RequestDoorToggle(key.Value, SceneManager.GetActiveScene().name))
+    if (_session.RequestDoorToggle(key.Value, SceneManager.GetActiveScene().name, isSlow))
     {
       _lastRequestedAt[key.Value] = now;
       Plugin.Log.LogInfo($"Submitted host-authoritative door toggle request for {key.Value:N}.");
@@ -112,7 +113,7 @@ internal sealed class DoorInteractionReplicator : MonoBehaviour
     }
   }
 
-  private void OnDoorIntent(long connectionId, Guid key, string sceneName)
+  private void OnDoorIntent(long connectionId, Guid key, string sceneName, bool isSlow)
   {
     if (_session == null || _identities == null || !_session.IsHost
         || !string.Equals(SceneManager.GetActiveScene().name, sceneName, StringComparison.Ordinal)
@@ -139,16 +140,16 @@ internal sealed class DoorInteractionReplicator : MonoBehaviour
       return;
     }
 
-    if (!ApplyState(door, !door.isOpen))
+    if (!ApplyState(door, !door.isOpen, isSlow))
     {
       Plugin.Log.LogError($"Host could not apply authoritative door state for {key:N}; no state was broadcast.");
       return;
     }
-    _session.BroadcastDoorState(key, sceneName, door.isOpen);
+    _session.BroadcastDoorState(key, sceneName, door.isOpen, isSlow);
     Plugin.Log.LogInfo($"Host applied door toggle {key:N}; open={door.isOpen}.");
   }
 
-  private void OnDoorState(Guid key, string sceneName, bool isOpen)
+  private void OnDoorState(Guid key, string sceneName, bool isOpen, bool isSlow)
   {
     if (_session == null || _session.IsHost || _identities == null
         || !string.Equals(SceneManager.GetActiveScene().name, sceneName, StringComparison.Ordinal)
@@ -159,11 +160,11 @@ internal sealed class DoorInteractionReplicator : MonoBehaviour
       return;
     }
 
-    if (door.isOpen != isOpen && !ApplyState(door, isOpen))
+    if ((door.isOpen != isOpen || door.openingSlowly != isSlow) && !ApplyState(door, isOpen, isSlow))
       Plugin.Log.LogError($"Client could not apply replicated door state for {key:N}.");
   }
 
-  private static bool ApplyState(Door door, bool isOpen)
+  private static bool ApplyState(Door door, bool isOpen, bool isSlow)
   {
     if (OpenSpeedField == null) return false;
     try
@@ -171,14 +172,20 @@ internal sealed class DoorInteractionReplicator : MonoBehaviour
       door.Resett();
       door.load_slow = false;
       door.useTim = 0f;
-      door.openingSlowly = false;
+      door.openingSlowly = isSlow;
       door.isOpen = isOpen;
       door.openedByPlayer = isOpen;
-      door.canUse = false;
+      // TS2's native slow transition needs canUse=true until its 0.8-second
+      // handle phase completes; its own Update then disables interaction and
+      // raises the animation speed. Normal transitions lock immediately.
+      door.canUse = isSlow;
       door.opening = true;
       door.npcUsing = false;
       door.DoorSound?.Stop();
-      OpenSpeedField.SetValue(door, 150f * door.speedMultiplier);
+      var speed = isSlow ? 17f * door.speedMultiplier : 150f * door.speedMultiplier;
+      if (isSlow && SlowOpenSpeedMultiplierField != null)
+        speed *= (float)SlowOpenSpeedMultiplierField.GetValue(door)!;
+      OpenSpeedField.SetValue(door, speed);
       return true;
     }
     catch (Exception exception)

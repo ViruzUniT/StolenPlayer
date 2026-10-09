@@ -32,8 +32,11 @@ internal readonly struct DoorInteractionData
 
   internal Guid Key { get; }
   internal string SceneName { get; }
-  // Intent action 0 means toggle; authoritative state actions 1 and 2 mean closed and open.
+  // Actions: 0 normal toggle intent, 1/2 normal closed/open state,
+  // 3 slow toggle intent, 4/5 slow closed/open state.
   internal byte Action { get; }
+  internal bool IsSlow => Action == 3 || Action == 4 || Action == 5;
+  internal bool IsOpen => Action == 2 || Action == 5;
 }
 
 internal static class DoorInteractionPayload
@@ -46,7 +49,7 @@ internal static class DoorInteractionPayload
   {
     var sceneBytes = Encoding.UTF8.GetBytes(sceneName ?? string.Empty);
     if (key == Guid.Empty || sceneBytes.Length == 0 || sceneBytes.Length > MaximumSceneNameBytes
-        || action > 2)
+        || action > 5)
       throw new ArgumentException("Door interaction fields are invalid.");
 
     var payload = new byte[FixedLength + sceneBytes.Length];
@@ -62,7 +65,7 @@ internal static class DoorInteractionPayload
     interaction = default;
     if (payload == null || payload.Length < FixedLength + 1
         || payload.Length > FixedLength + MaximumSceneNameBytes
-        || payload[16] > 2 || payload[17] == 0
+        || payload[16] > 5 || payload[17] == 0
         || payload.Length != FixedLength + payload[17]) return false;
     var key = new Guid(payload.Take(16).ToArray());
     if (key == Guid.Empty) return false;
@@ -590,7 +593,7 @@ internal readonly struct ProtocolMessage
 internal static class ProtocolCodec
 {
   internal const uint Magic = 0x43504C53; // "SLPC" in little-endian bytes.
-  internal const ushort CurrentVersion = 6;
+  internal const ushort CurrentVersion = 7;
   internal const int HeaderLength = 19;
   internal const int MaximumMessageSize = 64 * 1024;
 
