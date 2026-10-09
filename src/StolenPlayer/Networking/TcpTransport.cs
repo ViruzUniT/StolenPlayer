@@ -12,7 +12,10 @@ internal sealed class TcpTransport : ITransport
 {
   private const int PrefixLength = sizeof(int);
   private const int MaximumFrameLength = ProtocolCodec.MaximumMessageSize;
-  private const int MaximumMessagesPerPeerPerSecond = 128;
+  // A late-join door snapshot can contain 110 individually framed entries.
+  // Keep the byte cap as the primary flood bound, but leave enough packet
+  // headroom for the snapshot plus scene/roster traffic in the same second.
+  private const int MaximumMessagesPerPeerPerSecond = 512;
   private const int MaximumBytesPerPeerPerSecond = 1024 * 1024;
   private const int MaximumQueuedBytesPerPeer = 1024 * 1024;
   private const int MaximumAcceptsPerUpdate = 8;
